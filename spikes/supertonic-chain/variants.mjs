@@ -45,10 +45,11 @@ const N = ids.length;
 const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map(BigInt)), [1, N]);
 const textMask = new ort.Tensor('float32', new Float32Array(N).fill(1), [1, 1, N]);
 
+const SPEED = 1.05;
 const { duration } = await dp.run({ text_ids: textIds, style_dp: styleDp, text_mask: textMask });
-const seconds = Number(duration.data[0]);
-const L = Math.max(1, Math.round((seconds * SR) / HOP));
-const Lc = Math.max(1, Math.ceil(L / COMPRESS));
+const seconds = Number(duration.data[0]) / SPEED;
+const targetSamples = Math.max(1, Math.round(seconds * SR));
+const Lc = Math.max(1, Math.ceil(targetSamples / (HOP * COMPRESS)));
 const CH = DIM * COMPRESS;
 const { text_emb } = await te.run({ text_ids: textIds, style_ttl: styleTtl, text_mask: textMask });
 const latentMask = new ort.Tensor('float32', new Float32Array(Lc).fill(1), [1, 1, Lc]);
@@ -96,7 +97,8 @@ async function generate({ name, steps, scale, integrate }) {
   }
 
   const { wav_tts } = await voc.run({ latent: feed });
-  const a = wav_tts.data;
+  const full = wav_tts.data;
+  const a = full.subarray(0, Math.min(full.length, targetSamples));
   let peak = 0, energy = 0;
   for (let i = 0; i < a.length; i += 1) { const v = Math.abs(a[i]); if (v > peak) peak = v; energy += a[i] * a[i]; }
   const rms = Math.sqrt(energy / a.length);
@@ -119,7 +121,7 @@ async function generate({ name, steps, scale, integrate }) {
 
 // fp32 confirmed intelligible; B (denorm) and D (integrate) confirmed wrong.
 // Remaining question is purely the quality/latency tradeoff on step count.
-for (const steps of [2, 4, 8]) {
+for (const steps of [4, 8]) {
   const t0 = Date.now();
   await generate({ name: `fp32-${steps}step`, steps, scale: 1, integrate: false });
   console.log(`  -> ${((Date.now() - t0) / 1000).toFixed(1)}s wall for ${seconds.toFixed(2)}s audio
