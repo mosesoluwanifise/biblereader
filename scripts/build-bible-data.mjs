@@ -19,16 +19,32 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'public', 'bibles');
-const CDN = 'https://cdn.jsdelivr.net/gh/wldeh/bible-api/bibles';
+
+/**
+ * Source: bible-api.com.
+ *
+ * The previous source (wldeh/bible-api via jsDelivr) inlines translator
+ * footnotes into the verse text with no separate field — 18.8% of KJV verses
+ * carried them, e.g. "…were the first day.1.5 And the evening…: Heb. And the
+ * evening was…". In KJV they trail the verse; in WEB they are spliced
+ * mid-sentence with no delimiter, so the verse resumes after the note and no
+ * reliable strip is possible. Guessing where a footnote ends risks silently
+ * truncating Scripture, which is the worst failure this app can have.
+ *
+ * bible-api.com returns the same public-domain translations without footnotes.
+ * It is rate limited, but this runs once and the output is committed.
+ */
+const API = 'https://bible-api.com';
 
 export const TRANSLATIONS = [
-  { code: 'kjv', upstream: 'en-kjv', name: 'King James Version' },
-  { code: 'web', upstream: 'en-web', name: 'World English Bible' },
-  { code: 'asv', upstream: 'en-asv', name: 'American Standard Version' }
+  { code: 'kjv', upstream: 'kjv', name: 'King James Version' },
+  { code: 'web', upstream: 'web', name: 'World English Bible' },
+  { code: 'asv', upstream: 'asv', name: 'American Standard Version' }
 ];
 
-const CONCURRENCY = 8;
-const MAX_ATTEMPTS = 4;
+/** Polite against a small volunteer service; the build is one-time. */
+const CONCURRENCY = 2;
+const MAX_ATTEMPTS = 5;
 
 /** "1 Samuel" -> "1samuel". Confirmed against the CDN: lowercase, spaces stripped. */
 export function slugify(bookName) {
@@ -49,10 +65,38 @@ export function normalizeVerseText(text) {
  * The upstream envelope key is `data`, not `verses`. The pre-V1 fallback in
  * bibleService.ts read `data.verses` and therefore never once succeeded.
  */
+/**
+ * Text that must never reach a reader.
+ *
+ * `footnote` catches the previous source's inlined translator notes — kept as
+ * defence in depth so a source regression fails the build instead of shipping
+ * "…the first day.1.5 And the evening…: Heb." to someone reading Scripture.
+ * `replacement` and `loneSurrogate` catch mojibake; bible-api.com returns at
+ * least one verse (WEB 1 Chronicles 4:9) with a broken surrogate pair.
+ */
+export const CONTAMINATION = {
+  // The marker is the row's own chapter, a dot or colon, the verse, then a
+  // space. It glues to whatever precedes it — a letter in WEB ("God1:1 "), a
+  // full stop in KJV ("day.1.5 ") — so a word boundary does not catch both.
+  // The digit lookbehind keeps it from firing inside ordinary numbers.
+  footnote: (text, ref) =>
+    ref.chapter !== undefined && new RegExp(`(?<!\\d)${ref.chapter}[.:]\\d+\\s`).test(text),
+  replacement: (text) => text.includes('�'),
+  loneSurrogate: (text) => /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
+};
+
+/** Returns the names of every contamination check the text trips. */
+export function detectContamination(text, ref = {}) {
+  return Object.entries(CONTAMINATION)
+    .filter(([, test]) => test(text, ref))
+    .map(([name]) => name);
+}
+
 export function normalizeChapter(payload, ref = {}) {
-  const rows = payload?.data;
+  // bible-api.com returns { verses: [...] }; the previous source used `data`.
+  const rows = payload?.verses ?? payload?.data;
   if (!Array.isArray(rows)) {
-    throw new Error(`${ref.book ?? '?'} ${ref.chapter ?? '?'}: expected a "data" array, got ${typeof rows}`);
+    throw new Error(`${ref.book ?? '?'} ${ref.chapter ?? '?'}: expected a "verses" array, got ${typeof rows}`);
   }
 
   // The upstream repository emits every verse twice — Genesis 1 arrives as 62
@@ -66,6 +110,14 @@ export function normalizeChapter(payload, ref = {}) {
     const text = normalizeVerseText(row?.text);
     if (!Number.isFinite(verse) || verse < 1) continue;
     if (text.length === 0) continue;
+
+    const problems = detectContamination(text, { ...ref, chapter: ref.chapter });
+    if (problems.length > 0) {
+      throw new Error(
+        `${ref.book ?? '?'} ${ref.chapter ?? '?'}:${verse}: ${problems.join(', ')} — ` +
+          `"${text.slice(0, 80)}"`
+      );
+    }
 
     const seen = byVerse.get(verse);
     if (seen === undefined) {
@@ -100,6 +152,17 @@ export function validateBook(book, expectedChapters) {
       errors.push(`chapter ${n} is empty or missing`);
       continue;
     }
+    // Contamination is checked here too, not only at fetch time, so a cached
+    // file written by an earlier build fails validation and gets rebuilt
+    // instead of being silently skipped by the resume path.
+    for (const v of verses) {
+      const problems = detectContamination(v.text, { chapter: n });
+      if (problems.length > 0) {
+        errors.push(`chapter ${n}:${v.verse} ${problems.join(', ')}`);
+        break;
+      }
+    }
+
     const numbers = verses.map((v) => v.verse);
     if (new Set(numbers).size !== numbers.length) {
       errors.push(`chapter ${n} has duplicate verse numbers`);
@@ -115,14 +178,20 @@ export function validateBook(book, expectedChapters) {
   return { ok: errors.length === 0, errors };
 }
 
-export async function fetchChapter(upstream, slug, chapter, options = {}) {
-  const { attempts = MAX_ATTEMPTS, backoffMs = 250 } = options;
-  const url = `${CDN}/${upstream}/books/${slug}/chapters/${chapter}.json`;
+export async function fetchChapter(upstream, book, chapter, options = {}) {
+  const { attempts = MAX_ATTEMPTS, backoffMs = 500 } = options;
+  const url = `${API}/${encodeURIComponent(book)}+${chapter}?translation=${upstream}`;
   let lastError;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const res = await fetch(url);
+      // The service is rate limited; back off hard rather than hammering it.
+      if (res.status === 429) {
+        const retryAfter = Number(res.headers.get('retry-after')) || 0;
+        await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 2 ** attempt * backoffMs * 4)));
+        throw new Error('HTTP 429');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
@@ -134,7 +203,7 @@ export async function fetchChapter(upstream, slug, chapter, options = {}) {
   }
 
   // Surface a terminal error rather than returning a partial book.
-  throw new Error(`${slug} ${chapter}: ${lastError?.message ?? 'unknown error'} (${attempts} attempts)`);
+  throw new Error(`${book} ${chapter}: ${lastError?.message ?? 'unknown error'} (${attempts} attempts)`);
 }
 
 /** Runs `worker` over `items` with a bounded pool, preserving input order. */
@@ -155,11 +224,10 @@ async function mapPool(items, limit, worker) {
 }
 
 async function buildBook(translation, entry) {
-  const slug = slugify(entry.name);
   const chapterNumbers = Array.from({ length: entry.chapters }, (_, i) => i + 1);
 
   const chapterVerses = await mapPool(chapterNumbers, CONCURRENCY, async (n) => {
-    const payload = await fetchChapter(translation.upstream, slug, n);
+    const payload = await fetchChapter(translation.upstream, entry.name, n);
     return normalizeChapter(payload, { book: entry.name, chapter: n });
   });
 

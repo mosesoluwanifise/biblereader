@@ -129,11 +129,67 @@ describe('normalizeChapter', () => {
     );
   });
 
-  it('throws when the payload uses "verses" instead of "data"', () => {
+  it('rejects a verse carrying an inlined translator footnote', () => {
+    // The previous source contaminated 18.8% of KJV verses this way. The check
+    // stays as defence in depth: a source regression must fail the build rather
+    // than ship "…the first day.1.5 And the evening…: Heb." to a reader.
+    const payload = {
+      verses: [
+        {
+          verse: '5',
+          text:
+            'And God called the light Day, and the darkness he called Night. ' +
+            'And the evening and the morning were the first day.1.5 And the evening…: Heb. ' +
+            'And the evening was, and the morning was etc.'
+        }
+      ]
+    };
+    expect(() => normalizeChapter(payload, { book: 'Genesis', chapter: 1 })).toThrow(/footnote/);
+  });
+
+  it('rejects the colon-style footnote marker the WEB text uses', () => {
+    const payload = {
+      verses: [{ verse: '1', text: 'In the beginning, God1:1 The Hebrew word rendered God. created the heavens.' }]
+    };
+    expect(() => normalizeChapter(payload, { book: 'Genesis', chapter: 1 })).toThrow(/footnote/);
+  });
+
+  it('rejects mojibake', () => {
+    const payload = { verses: [{ verse: '9', text: 'His mother named him Jabez, saying, � Because I bore him.' }] };
+    expect(() => normalizeChapter(payload, { book: '1 Chronicles', chapter: 4 })).toThrow(/replacement/);
+  });
+
+  it('rejects a lone surrogate', () => {
+    const payload = { verses: [{ verse: '9', text: 'bore him with sorrow.\uDC9D' }] };
+    expect(() => normalizeChapter(payload, { book: '1 Chronicles', chapter: 4 })).toThrow(/loneSurrogate/);
+  });
+
+  it('accepts a verse that merely mentions numbers', () => {
+    // "1 5" with a space is prose, not a marker; only the glued form is a note.
+    const payload = { verses: [{ verse: '5', text: 'And Adam lived a hundred and thirty years.' }] };
+    expect(normalizeChapter(payload, { book: 'Genesis', chapter: 5 })).toHaveLength(1);
+  });
+
+  it('accepts the ASV bracket convention', () => {
+    const payload = {
+      verses: [{ verse: '37', text: '[And Philip said, If thou believest with all thy heart, thou mayest.]' }]
+    };
+    expect(normalizeChapter(payload, { book: 'Acts', chapter: 8 })).toHaveLength(1);
+  });
+
+  it('reads the bible-api.com "verses" envelope and collapses its newlines', () => {
+    const payload = {
+      verses: [{ verse: '4', text: 'And God saw the light, that\nit was good: and God divided the light.\n' }]
+    };
+    const [only] = normalizeChapter(payload, { book: 'Genesis', chapter: 1 });
+    expect(only.text).toBe('And God saw the light, that it was good: and God divided the light.');
+  });
+
+  it('throws when the payload has neither "verses" nor "data"', () => {
     // This is the exact shape the pre-V1 fallback assumed. Failing loudly here
     // is what keeps that class of silent-miss bug from returning.
-    expect(() => normalizeChapter({ verses: [{ verse: 1, text: 'x' }] }, { book: 'Genesis', chapter: 1 })).toThrow(
-      /expected a "data" array/
+    expect(() => normalizeChapter({ nope: [] }, { book: 'Genesis', chapter: 1 })).toThrow(
+      /expected a "verses" array/
     );
   });
 });
