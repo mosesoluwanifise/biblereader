@@ -1,18 +1,29 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { BibleView } from './components/BibleView';
 import { AudioControls } from './components/AudioControls';
 import { VoiceSelector } from './components/VoiceSelector';
 import { ChapterResult, TranslationCode, Verse } from './services/bible/types';
-import { VoiceOption } from './services/tts/types';
-import { PRESET_VOICES, supertonicEngine } from './services/tts/supertonicEngine';
+import { EngineTier, VoiceOption } from './services/tts/types';
+import { PRESET_VOICES } from './services/tts/supertonicEngine';
 import { getNextChapter, loadChapter, computeVerseOffsets } from './services/bible/bibleService';
 import { playbackController, PlaybackState } from './services/audio/playbackController';
 
+/**
+ * Chapter state carries the passage it belongs to.
+ *
+ * Without that key, auto-advance replayed the previous chapter: moving the
+ * passage re-renders before the loading effect's state update lands, so the
+ * continuation effect saw the *old* loaded verses, treated them as the new
+ * chapter, and consumed the continuation flag — after which the real chapter
+ * never resumed.
+ */
 type ChapterState =
-  | { status: 'loading' }
-  | { status: 'loaded'; verses: Verse[] }
-  | { status: 'error'; message: string; retryable: boolean };
+  | { status: 'loading'; key: string }
+  | { status: 'loaded'; key: string; verses: Verse[] }
+  | { status: 'error'; key: string; message: string; retryable: boolean };
+
+const passageKeyOf = (t: TranslationCode, b: string, c: number) => `${t}|${b}|${c}`;
 
 export const App: React.FC = () => {
   const [translation, setTranslation] = useState<TranslationCode>('KJV');
@@ -20,9 +31,13 @@ export const App: React.FC = () => {
   const [chapter, setChapter] = useState<number>(1);
   const [currentVoice, setCurrentVoice] = useState<VoiceOption>(PRESET_VOICES[0]);
 
-  const [chapterState, setChapterState] = useState<ChapterState>({ status: 'loading' });
+  const passageKey = passageKeyOf(translation, book, chapter);
+
+  const [chapterState, setChapterState] = useState<ChapterState>({ status: 'loading', key: passageKey });
   const [reloadToken, setReloadToken] = useState(0);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
+  const [engineTier, setEngineTier] = useState<EngineTier | null>(null);
+  const [modelProgress, setModelProgress] = useState<number | null>(null);
   const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -35,15 +50,21 @@ export const App: React.FC = () => {
   // an await before audio starts.
   useEffect(() => {
     let active = true;
-    setChapterState({ status: 'loading' });
+    const key = passageKeyOf(translation, book, chapter);
+    setChapterState({ status: 'loading', key });
 
     loadChapter(book, chapter, translation).then((result: ChapterResult) => {
       if (!active) return;
       if (result.ok) {
-        setChapterState({ status: 'loaded', verses: result.verses });
+        setChapterState({ status: 'loaded', key, verses: result.verses });
       } else {
         continuePlaying.current = false;
-        setChapterState({ status: 'error', message: result.message, retryable: result.reason === 'unavailable' });
+        setChapterState({
+          status: 'error',
+          key,
+          message: result.message,
+          retryable: result.reason === 'unavailable'
+        });
       }
     });
 
@@ -52,17 +73,21 @@ export const App: React.FC = () => {
     };
   }, [book, chapter, translation, reloadToken]);
 
-  const verses = chapterState.status === 'loaded' ? chapterState.verses : [];
+  /** Verses only count as current when they belong to the displayed passage. */
+  const currentVerses = useMemo(
+    () => (chapterState.status === 'loaded' && chapterState.key === passageKey ? chapterState.verses : null),
+    [chapterState, passageKey]
+  );
 
   const beginPlayback = useCallback(
     (fromVerse?: number) => {
-      if (chapterState.status !== 'loaded') return;
+      if (!currentVerses) return;
 
-      const selected = fromVerse ? chapterState.verses.filter((v) => v.verse >= fromVerse) : chapterState.verses;
+      const selected = fromVerse ? currentVerses.filter((v) => v.verse >= fromVerse) : currentVerses;
       if (selected.length === 0) return;
 
-      const offsets = computeVerseOffsets(chapterState.verses);
-      const startIndex = fromVerse ? chapterState.verses.findIndex((v) => v.verse >= fromVerse) : 0;
+      const offsets = computeVerseOffsets(currentVerses);
+      const startIndex = fromVerse ? currentVerses.findIndex((v) => v.verse >= fromVerse) : 0;
       const startWordOffset = startIndex >= 0 ? offsets[startIndex] : 0;
 
       setEngineError(null);
@@ -74,15 +99,16 @@ export const App: React.FC = () => {
         {
           onWord: setActiveWordIndex,
           onStateChange: setPlaybackState,
+          onTier: setEngineTier,
+          onModelProgress: setModelProgress,
           onError: (message) => {
             setEngineError(message);
             setActiveWordIndex(-1);
           },
           onEnd: () => {
             setActiveWordIndex(-1);
-            // R4: hand off to the next chapter by moving the passage and
-            // flagging intent. The effect below restarts playback once the new
-            // text has loaded — no timer, and no stale closure to capture.
+            // R4: hand off by moving the passage and flagging intent. The
+            // effect below resumes once the *matching* chapter has loaded.
             const next = getNextChapter(book, chapter);
             if (!next) return;
             continuePlaying.current = true;
@@ -93,16 +119,18 @@ export const App: React.FC = () => {
         startWordOffset
       );
     },
-    [chapterState, currentVoice.id, book, chapter]
+    [currentVerses, currentVoice.id, book, chapter]
   );
 
   // Resumes playback after auto-advance, once the next chapter's text is in.
+  // Gated on currentVerses, which is null while the loaded state still belongs
+  // to the previous passage — so a stale render cannot consume the flag.
   useEffect(() => {
     if (!continuePlaying.current) return;
-    if (chapterState.status !== 'loaded') return;
+    if (!currentVerses) return;
     continuePlaying.current = false;
     beginPlayback();
-  }, [chapterState, beginPlayback]);
+  }, [currentVerses, beginPlayback]);
 
   const handleTogglePlay = () => {
     if (playbackState === 'playing') {
@@ -117,8 +145,7 @@ export const App: React.FC = () => {
   };
 
   const handleRestart = () => {
-    playbackController.stop();
-    setActiveWordIndex(-1);
+    stopForNavigation();
   };
 
   const stopForNavigation = () => {
@@ -139,6 +166,9 @@ export const App: React.FC = () => {
 
   useEffect(() => () => playbackController.stop(), []);
 
+  const viewState: ChapterState =
+    chapterState.key === passageKey ? chapterState : { status: 'loading', key: passageKey };
+
   return (
     <div className="app-container">
       <Header
@@ -152,7 +182,7 @@ export const App: React.FC = () => {
         translation={translation}
         book={book}
         chapter={chapter}
-        state={chapterState}
+        state={viewState}
         onRetry={() => setReloadToken((n) => n + 1)}
         onSelectBook={(newBook) => {
           stopForNavigation();
@@ -170,9 +200,10 @@ export const App: React.FC = () => {
         passageTitle={`${book} ${chapter} (${translation})`}
         voice={currentVoice}
         playbackState={playbackState}
-        engineStatus={supertonicEngine.getStatus()}
+        engineTier={engineTier}
+        modelProgress={modelProgress}
         errorMessage={engineError}
-        disabled={verses.length === 0}
+        disabled={!currentVerses}
         onTogglePlay={handleTogglePlay}
         onRestart={handleRestart}
         onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}

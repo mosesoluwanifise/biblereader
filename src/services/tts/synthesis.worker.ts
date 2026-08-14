@@ -37,13 +37,37 @@ let modelBase = '/models/supertonic-3';
 
 export type WorkerRequest =
   | { id: number; type: 'load'; modelBase: string }
-  | { id: number; type: 'synthesize'; text: string; voiceId: string; steps: number };
+  | { id: number; type: 'synthesize'; text: string; voiceId: string; steps: number; generation: number }
+  | { id: number; type: 'cancel'; generation: number };
 
 export type WorkerResponse =
   | { id: number; type: 'progress'; loaded: number; total: number; label: string }
   | { id: number; type: 'loaded'; backend: string; version: string | null; voiceIds: string[] }
   | { id: number; type: 'audio'; audio: ArrayBuffer; sampleRate: number; predicted: number }
+  | { id: number; type: 'cancelled' }
   | { id: number; type: 'error'; message: string };
+
+/**
+ * Generations older than this are abandoned. Stopping playback used to leave
+ * inference running: the controller dropped its reference, but the worker kept
+ * executing the graph chain, so navigating or switching voice mid-sentence
+ * stacked concurrent chains on shared sessions — severe CPU and memory
+ * pressure on mobile.
+ */
+let liveGeneration = 0;
+
+/** Serialises synthesis; concurrent runs on one session are not safe. */
+let queue: Promise<unknown> = Promise.resolve();
+
+class Cancelled extends Error {
+  constructor() {
+    super('cancelled');
+  }
+}
+
+function assertLive(generation: number): void {
+  if (generation < liveGeneration) throw new Cancelled();
+}
 
 function tensorFromStyle(node: { data: unknown }): ort.Tensor {
   const flat: number[] = [];
@@ -115,8 +139,15 @@ async function load(id: number, base: string): Promise<void> {
   post({ id, type: 'loaded', backend: backend ?? 'wasm', version: manifest.version ?? null, voiceIds });
 }
 
-async function synthesize(id: number, text: string, voiceId: string, steps: number): Promise<void> {
+async function synthesize(
+  id: number,
+  text: string,
+  voiceId: string,
+  steps: number,
+  generation: number
+): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
+  assertLive(generation);
   const style = styles.get(voiceId) ?? styles.values().next().value;
   if (!style) throw new Error(`Unknown voice: ${voiceId}`);
 
@@ -158,6 +189,9 @@ async function synthesize(id: number, text: string, voiceId: string, steps: numb
   const latentMask = new ort.Tensor('float32', new Float32Array(compressedFrames).fill(1), [1, 1, compressedFrames]);
 
   for (let step = 0; step < steps; step += 1) {
+    // Checked between steps so an abandoned run stops within one step rather
+    // than completing the whole chain.
+    assertLive(generation);
     const out = await ve.run({
       noisy_latent: latent,
       text_emb: encoded.text_emb,
@@ -170,6 +204,7 @@ async function synthesize(id: number, text: string, voiceId: string, steps: numb
     latent = out.denoised_latent as ort.Tensor;
   }
 
+  assertLive(generation);
   const vocoded = await sessions.get('vocoder')!.run({ latent });
   const source = vocoded.wav_tts.data as Float32Array;
 
@@ -186,14 +221,29 @@ async function synthesize(id: number, text: string, voiceId: string, steps: numb
   post({ id, type: 'audio', audio: samples.buffer, sampleRate: SAMPLE_RATE, predicted }, [samples.buffer]);
 }
 
-self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
+self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const request = event.data;
-  try {
-    if (request.type === 'load') await load(request.id, request.modelBase);
-    else if (request.type === 'synthesize') {
-      await synthesize(request.id, request.text, request.voiceId, request.steps);
-    }
-  } catch (err) {
-    post({ id: request.id, type: 'error', message: (err as Error)?.message ?? 'Synthesis failed' });
+
+  // Cancellation must take effect immediately, not behind the queue it is
+  // cancelling.
+  if (request.type === 'cancel') {
+    liveGeneration = Math.max(liveGeneration, request.generation);
+    return;
   }
+
+  queue = queue.then(async () => {
+    try {
+      if (request.type === 'load') {
+        await load(request.id, request.modelBase);
+      } else {
+        await synthesize(request.id, request.text, request.voiceId, request.steps, request.generation);
+      }
+    } catch (err) {
+      if (err instanceof Cancelled) {
+        post({ id: request.id, type: 'cancelled' });
+        return;
+      }
+      post({ id: request.id, type: 'error', message: (err as Error)?.message ?? 'Synthesis failed' });
+    }
+  });
 };

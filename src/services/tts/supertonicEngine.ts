@@ -42,6 +42,14 @@ interface Pending {
 /** Plain Omit collapses a discriminated union into its shared keys. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
+/** Thrown when a synthesis is abandoned; callers should exit quietly. */
+export class EngineCancelled extends Error {
+  constructor() {
+    super('Synthesis cancelled');
+    this.name = 'EngineCancelled';
+  }
+}
+
 export class SupertonicEngine {
   private worker: Worker | null = null;
   private pending = new Map<number, Pending>();
@@ -51,6 +59,7 @@ export class SupertonicEngine {
   private backend: string | null = null;
   private version: string | null = null;
   private voiceIds: string[] = [];
+  private currentGeneration = 1;
 
   getStatus(): EngineStatus {
     return this.status;
@@ -108,6 +117,10 @@ export class SupertonicEngine {
         this.pending.delete(message.id);
         (entry.resolve as unknown as (v: WorkerResponse) => void)(message);
         break;
+      case 'cancelled':
+        this.pending.delete(message.id);
+        entry.reject(new EngineCancelled());
+        break;
       case 'error':
         this.pending.delete(message.id);
         entry.reject(new Error(message.message));
@@ -149,7 +162,8 @@ export class SupertonicEngine {
   async synthesizeSentence(
     text: string,
     voiceId: string = DEFAULT_VOICE_ID,
-    steps: number = DEFAULT_STEPS
+    steps: number = DEFAULT_STEPS,
+    generation: number = this.generation
   ): Promise<SynthesisResult> {
     const trimmed = text.trim();
     if (trimmed.length === 0) {
@@ -161,7 +175,8 @@ export class SupertonicEngine {
       type: 'synthesize',
       text: trimmed,
       voiceId,
-      steps
+      steps,
+      generation
     });
 
     const audio = new Float32Array(result.audio);
@@ -173,6 +188,21 @@ export class SupertonicEngine {
       duration,
       words: interpolateWordTimings(trimmed, duration)
     };
+  }
+
+  /** Current generation; synthesis requests are tagged with it. */
+  get generation(): number {
+    return this.currentGeneration;
+  }
+
+  /**
+   * Abandons in-flight and queued synthesis. Without this, stopping playback
+   * left the worker executing graph chains nobody was waiting for.
+   */
+  cancelInFlight(): number {
+    this.currentGeneration += 1;
+    this.worker?.postMessage({ id: 0, type: 'cancel', generation: this.currentGeneration } as WorkerRequest);
+    return this.currentGeneration;
   }
 
   async dispose(): Promise<void> {

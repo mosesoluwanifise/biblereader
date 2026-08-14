@@ -20,7 +20,7 @@
  * bundle is still correct, just larger, and the manifest says which it is.
  */
 
-import { mkdir, writeFile, readFile, stat, access } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat, access, copyFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -129,6 +129,8 @@ async function main() {
   console.log(`  ${'voice_styles/*.json'.padEnd(34)} ${VOICE_STYLES.length} styles`);
 
   let quantizedAny = false;
+  const quantizedGraphs = [];
+  const unmodifiedGraphs = [];
   for (const graph of GRAPHS) {
     const rel = `onnx/${graph}.onnx`;
     const raw = join(OUT, `onnx/${graph}.fp32.onnx`);
@@ -136,26 +138,38 @@ async function main() {
 
     const target = join(OUT, rel);
     let finalBytes = bytes;
+    let graphIsQuantized = false;
 
+    // Always rewrite the target. Skipping when a file already exists meant a
+    // mode switch silently kept the previous artifacts: an fp32 rebuild after
+    // an int8 build retained int8 graphs while reporting fp32, which would
+    // quietly reintroduce the unintelligible, 7x-slower weights and emit a
+    // manifest and NOTICE that disagreed with what actually shipped.
     if (canQuantize && !QUANTIZE_SKIP.has(graph)) {
-      if (!(await exists(target))) {
-        process.stdout.write(`  ${rel.padEnd(34)} quantizing ${(bytes / 1048576).toFixed(0)} MB...`);
-        try {
-          await quantize(raw, target);
-          quantizedAny = true;
-        } catch (err) {
-          console.log(` failed (${err.message.split('\n')[0].slice(0, 60)}) — using fp32`);
-          await writeFile(target, await readFile(raw));
-        }
-      } else {
+      process.stdout.write(`  ${rel.padEnd(34)} quantizing ${(bytes / 1048576).toFixed(0)} MB...`);
+      try {
+        await quantize(raw, target);
         quantizedAny = true;
+        graphIsQuantized = true;
+      } catch (err) {
+        console.log(` failed (${err.message.split('\n')[0].slice(0, 60)}) — using fp32`);
+        await copyFile(raw, target);
       }
       finalBytes = (await stat(target)).size;
-      process.stdout.write(`\r  ${rel.padEnd(34)} ${(finalBytes / 1048576).toFixed(1)} MB (int8, from ${(bytes / 1048576).toFixed(0)} MB)\n`);
+      process.stdout.write(
+        `\r  ${rel.padEnd(34)} ${(finalBytes / 1048576).toFixed(1)} MB ` +
+          `(${graphIsQuantized ? `int8, from ${(bytes / 1048576).toFixed(0)} MB` : 'fp32'})\n`
+      );
     } else {
-      if (!(await exists(target))) await writeFile(target, await readFile(raw));
+      await copyFile(raw, target);
+      finalBytes = (await stat(target)).size;
       console.log(`  ${rel.padEnd(34)} ${(finalBytes / 1048576).toFixed(1)} MB (fp32)`);
     }
+
+    // Metadata is derived from the artifact actually written, never from what
+    // was requested.
+    if (graphIsQuantized) quantizedGraphs.push(graph);
+    else unmodifiedGraphs.push(graph);
 
     await record(rel);
   }
@@ -181,19 +195,17 @@ by Supertone is claimed or implied.
 Modifications
 -------------
 ${
-  quantizedAny
+  quantizedGraphs.length > 0
     ? `The following graphs were modified from the upstream release: weights were
 dynamically quantized from float32 to int8 to reduce download size for
 in-browser inference. No other change was made to the model architecture,
 weights, or outputs.
 
-  ${GRAPHS.filter((g) => !QUANTIZE_SKIP.has(g))
-    .map((g) => `onnx/${g}.onnx`)
-    .join('\n  ')}
+  ${quantizedGraphs.map((g) => `onnx/${g}.onnx`).join('\n  ')}
 
 Graphs left unmodified from upstream:
 
-  ${[...QUANTIZE_SKIP].map((g) => `onnx/${g}.onnx`).join('\n  ')}`
+  ${unmodifiedGraphs.map((g) => `onnx/${g}.onnx`).join('\n  ')}`
     : `No modifications were made to the upstream weights. All graphs in this
 directory are byte-identical to the upstream release.`
 }
@@ -216,7 +228,9 @@ in the application interface, per Attachment A(e).
     name: 'supertonic-3',
     source: `https://huggingface.co/${REPO}`,
     license: 'BigScience Open RAIL-M',
-    quantization: quantizedAny ? 'int8-dynamic' : 'none',
+    quantization: quantizedGraphs.length > 0 ? 'int8-dynamic' : 'none',
+    quantizedGraphs,
+    unmodifiedGraphs,
     builtAt: new Date().toISOString(),
     sampleRate: 44100,
     graphs: GRAPHS,

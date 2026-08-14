@@ -416,3 +416,15 @@ body {
 }
 
 .btn-play-pause:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.player-meta { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.15rem; flex-wrap: wrap; }
+
+.player-upgrade {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  border-left: 1px solid var(--border-color);
+  padding-left: 0.6rem;
+}
+
+a.player-disclosure { text-decoration: none; }
+a.player-disclosure:hover { border-color: var(--accent-gold); color: var(--accent-gold); }
