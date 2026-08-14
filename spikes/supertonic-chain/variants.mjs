@@ -40,7 +40,10 @@ const [dp, te, ve, voc] = await Promise.all([
   load('duration_predictor'), load('text_encoder'), load('vector_estimator'), load('vocoder')
 ]);
 
-const ids = [...TEXT].map((ch) => { const cp = ch.codePointAt(0); return cp < indexer.length ? indexer[cp] : 0; });
+// Supertonic-3 conditions on a language tag; omitting it costs 20% in
+// predicted duration and flattens prosody.
+const TAGGED = process.env.NO_TAG ? TEXT : `<en>${TEXT}</en>`;
+const ids = [...TAGGED].map((ch) => { const cp = ch.codePointAt(0); return cp < indexer.length ? indexer[cp] : 0; });
 const N = ids.length;
 const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map(BigInt)), [1, N]);
 const textMask = new ort.Tensor('float32', new Float32Array(N).fill(1), [1, 1, N]);
@@ -121,7 +124,7 @@ async function generate({ name, steps, scale, integrate }) {
 
 // fp32 confirmed intelligible; B (denorm) and D (integrate) confirmed wrong.
 // Remaining question is purely the quality/latency tradeoff on step count.
-for (const steps of [4, 8]) {
+for (const steps of [8]) {
   const t0 = Date.now();
   await generate({ name: `fp32-${steps}step`, steps, scale: 1, integrate: false });
   console.log(`  -> ${((Date.now() - t0) / 1000).toFixed(1)}s wall for ${seconds.toFixed(2)}s audio

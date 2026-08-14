@@ -21,6 +21,16 @@ const COMPRESS = 6; // ttl.chunk_compress_factor
 /** Reference pipeline's default. Slightly faster than the raw prediction. */
 const SPEED = 1.05;
 
+/**
+ * Supertonic-3 is multilingual and conditions on a language tag wrapping the
+ * text. Omitting it is not neutral: the same sentence untagged is predicted at
+ * 4.4369s against 3.6964s tagged — 20% slower — and the prosody is conditioned
+ * on no language at all, which reads as flat, drawn-out delivery.
+ */
+const LANGUAGE = 'en';
+
+const tagText = (text: string) => `<${LANGUAGE}>${text}</${LANGUAGE}>`;
+
 type Graph = 'duration_predictor' | 'text_encoder' | 'vector_estimator' | 'vocoder';
 const GRAPHS: Graph[] = ['duration_predictor', 'text_encoder', 'vector_estimator', 'vocoder'];
 
@@ -151,7 +161,9 @@ async function synthesize(
   const style = styles.get(voiceId) ?? styles.values().next().value;
   if (!style) throw new Error(`Unknown voice: ${voiceId}`);
 
-  const ids = [...text].map((ch) => {
+  // Tag affects synthesis only; word timings are derived from the untagged
+  // text by the caller, so the tag must not leak into the word list.
+  const ids = [...tagText(text)].map((ch) => {
     const cp = ch.codePointAt(0) ?? 0;
     return cp < indexer!.length ? indexer![cp] : 0;
   });
