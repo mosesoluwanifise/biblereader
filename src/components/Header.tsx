@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Sparkles, UserCheck, ShieldCheck } from 'lucide-react';
+import { BookOpen, Sparkles } from 'lucide-react';
 import { TranslationCode } from '../services/bible/types';
 import { VoiceOption } from '../services/tts/types';
 
@@ -8,19 +8,13 @@ interface HeaderProps {
   onSelectTranslation: (t: TranslationCode) => void;
   currentVoice: VoiceOption;
   onOpenVoiceSelector: () => void;
-  onOpenVoiceCloning: () => void;
-  isSubscribed: boolean;
-  onToggleSubscription: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentTranslation,
   onSelectTranslation,
   currentVoice,
-  onOpenVoiceSelector,
-  onOpenVoiceCloning,
-  isSubscribed,
-  onToggleSubscription
+  onOpenVoiceSelector
 }) => {
   return (
     <header className="app-header">
@@ -34,24 +28,17 @@ export const Header: React.FC<HeaderProps> = ({
           className="select-badge"
           value={currentTranslation}
           onChange={(e) => onSelectTranslation(e.target.value as TranslationCode)}
-          title="Switch Bible Translation (R11: Preserves Reading Position)"
+          aria-label="Bible translation"
+          title="Switch translation — reading position is preserved"
         >
           <option value="KJV">KJV — King James</option>
           <option value="WEB">WEB — World English</option>
           <option value="ASV">ASV — American Standard</option>
         </select>
 
-        <button className="select-badge" onClick={onOpenVoiceSelector} title="Change Voice">
+        <button className="select-badge" onClick={onOpenVoiceSelector} title="Change voice">
           <Sparkles size={16} className="text-gold" />
           <span>{currentVoice.name}</span>
-        </button>
-
-        <button 
-          className={`btn ${isSubscribed ? 'btn-secondary' : 'btn-primary'}`}
-          onClick={onOpenVoiceCloning}
-        >
-          <UserCheck size={16} />
-          <span>{currentVoice.isCloned ? 'My Cloned Voice' : 'Clone A Voice'}</span>
         </button>
       </div>
     </header>

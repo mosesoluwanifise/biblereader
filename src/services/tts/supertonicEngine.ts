@@ -5,7 +5,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-david',
     name: 'David (Narrative Male)',
     description: 'Warm, resonant male voice for narrative Scripture',
-    isCloned: false,
     gender: 'male',
     accent: 'American'
   },
@@ -13,7 +12,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-hannah',
     name: 'Hannah (Gentle Female)',
     description: 'Clear, soft female voice with natural cadence',
-    isCloned: false,
     gender: 'female',
     accent: 'American'
   },
@@ -21,7 +19,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-samuel',
     name: 'Samuel (Reverent Male)',
     description: 'Deep, solemn male voice for Psalms & Wisdom',
-    isCloned: false,
     gender: 'male',
     accent: 'British'
   },
@@ -29,7 +26,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-ruth',
     name: 'Ruth (Solemn Female)',
     description: 'Reverent British female voice for poetry',
-    isCloned: false,
     gender: 'female',
     accent: 'British'
   },
@@ -37,7 +33,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-solomon',
     name: 'Solomon (Majestic Bass)',
     description: 'Deep bass male voice for Old Testament books',
-    isCloned: false,
     gender: 'male',
     accent: 'American'
   },
@@ -45,7 +40,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-esther',
     name: 'Esther (Graceful Female)',
     description: 'Clear, compassionate female narration',
-    isCloned: false,
     gender: 'female',
     accent: 'American'
   },
@@ -53,7 +47,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-elijah',
     name: 'Elijah (Prophetic Male)',
     description: 'Strong, authoritative male voice for Prophets',
-    isCloned: false,
     gender: 'male',
     accent: 'American'
   },
@@ -61,7 +54,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-mary',
     name: 'Mary (Devotional Female)',
     description: 'Warm, contemplative female voice for Gospels',
-    isCloned: false,
     gender: 'female',
     accent: 'American'
   },
@@ -69,7 +61,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-paul',
     name: 'Paul (Apostolic Male)',
     description: 'Direct, persuasive male voice for Epistles',
-    isCloned: false,
     gender: 'male',
     accent: 'British'
   },
@@ -77,7 +68,6 @@ export const PRESET_VOICES: VoiceOption[] = [
     id: 'supertonic-lydia',
     name: 'Lydia (Peaceful Female)',
     description: 'Calming, serene female voice for peaceful meditation',
-    isCloned: false,
     gender: 'female',
     accent: 'American'
   }

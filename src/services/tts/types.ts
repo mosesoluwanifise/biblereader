@@ -1,21 +1,16 @@
 export interface WordTimestamp {
   word: string;
-  start: number; // in seconds
-  end: number;   // in seconds
+  start: number; // seconds
+  end: number; // seconds
 }
+
+/** Which engine tier produced a given playback session. */
+export type EngineTier = 'supertonic' | 'web-speech';
 
 export interface VoiceOption {
   id: string;
   name: string;
   description: string;
-  isCloned: boolean;
   accent?: string;
   gender?: 'male' | 'female';
-  previewUrl?: string;
-}
-
-export interface TTSStreamResult {
-  audioUrl: string;
-  timestamps: WordTimestamp[];
-  engine: 'supertonic' | 'pocket-tts';
 }

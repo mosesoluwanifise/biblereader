@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, RotateCcw, Volume2, Sparkles, Cpu, HardDrive } from 'lucide-react';
+import { Play, Pause, RotateCcw, Volume2, Cpu } from 'lucide-react';
 import { VoiceOption } from '../services/tts/types';
 
 interface AudioControlsProps {
@@ -25,7 +25,7 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
         <div className="player-info">
           <span className="player-passage">{passageTitle}</span>
           <span className="player-voice-tag" onClick={onOpenVoiceSelector} style={{ cursor: 'pointer' }}>
-            {voice.isCloned ? <HardDrive size={12} /> : <Cpu size={12} />}
+            <Cpu size={12} />
             <span>{voice.name}</span>
           </span>
         </div>
