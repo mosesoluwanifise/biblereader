@@ -77,7 +77,9 @@ KTD3. **Drive the four ONNX graphs directly with `onnxruntime-web`.** `@superton
 
 KTD4. **Quantize to int8 in-house from the official `Supertone/supertonic-3` release.** fp32 is 380 MB — `vector_estimator.onnx` alone is 245 MB — against 138 MB for int8, with the duration predictor preserved as a separate graph. Third-party int8 packs were rejected on license-chain grounds: `csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11` carries no license tag, and `onnx-community/Supertonic-TTS-ONNX` ships no LICENSE file at all. *Self-quantizing keeps the license chain clean and removes an unpinned third-party dependency from a 138 MB critical-path asset.*
 
-KTD5. **Word timing comes from the duration predictor's output tensor, not from `onboundary`.** `duration_predictor.onnx` is exported as a standalone graph in both fp32 and int8 packs, so its output is directly readable. This resolves the origin document's open question about extracting word-level timing, and removes the dependency on speech-synthesis boundary events that mobile browsers do not fire.
+KTD5. **Word timing is interpolated within model-anchored sentence boundaries.** The U11 spike measured the real signature: `duration_predictor.onnx` takes `text_ids`, `style_dp`, and a rank-3 `text_mask`, and returns `duration` as a **single scalar** — total utterance seconds, not per-token durations. Verified to scale monotonically with text length at 88–145 wpm across two voice styles. Per-word timing is therefore not readable from the graph.
+
+Because U6 synthesizes per sentence anyway for time-to-first-audio, each sentence gets its own model-predicted duration. Word positions are interpolated by character weight *within* that sentence, and every sentence re-anchors the clock. *Error stays bounded inside one sentence and never accumulates, so a chapter cannot drift even though individual word positions are approximate.* Tokenization is character-level via a 65,536-entry codepoint table, so character weighting matches what the model actually consumed.
 
 KTD6. **Web Speech remains as a labelled interim engine during model download.** A 138 MB wall before any audio plays is an unacceptable first run. The existing `speechSynthesis` path already works on desktop and costs nothing to keep as a fallback tier. Highlighting degrades to verse-level while interim, and the UI says so. *Reversible: if first-run telemetry shows the interim tier confuses more than it helps, gate playback instead.*
 
@@ -118,7 +120,15 @@ flowchart TB
     Interim -.->|download completes| Backend
 ```
 
-The graph chain above is inferred from the exported artifact names and is directional guidance for the U11 spike, not a settled contract. U11 confirms the real tensor signatures and updates this section before U5 begins.
+Signatures confirmed by the U11 spike, loaded through `onnxruntime-web`:
+
+| Graph | Inputs | Output |
+| --- | --- | --- |
+| `duration_predictor` | `text_ids` int64 [1,N], `style_dp` float32 [1,8,16], `text_mask` float32 [1,1,N] | `duration` float32 **[1]** |
+| `text_encoder` | `text_ids`, `style_ttl`, `text_mask` | `text_emb` |
+| `vocoder` | `latent` | `wav_tts` |
+
+`duration` is a scalar, so the phoneme-level branch of the diagram does not exist — see KTD5. Audio output at 44.1 kHz is not yet proven end to end; `vector_estimator` still needs wiring in U6.
 
 ---
 
@@ -348,7 +358,7 @@ src/services/tts/
 
 ## Open Questions
 
-- Does the duration predictor emit durations at phoneme granularity that maps onto word boundaries, or will sentence-bounded proportional distribution be required? Resolved by the U11 spike.
+- Does AE1's ±150 ms word-sync tolerance survive interpolation? The chapter-level half of that acceptance example — no visible drift by the end — is met by construction, since every sentence re-anchors. The per-word half is not measured yet and needs checking against real audio in U7.
 - What storage budget will iOS actually grant a 138 MB model bundle in practice, and how often is it evicted?
 - Should the interim Web Speech tier persist after model download as a low-bandwidth option, or be removed once assets are cached?
 

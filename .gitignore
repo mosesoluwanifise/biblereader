@@ -43,3 +43,6 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Spike model downloads (~380 MB, re-fetchable from Hugging Face)
+spikes/**/models/
