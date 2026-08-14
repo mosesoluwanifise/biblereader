@@ -17,13 +17,18 @@ export { PRESET_VOICES, findVoice, DEFAULT_VOICE_ID } from './voices';
 const MODEL_BASE = `${import.meta.env.BASE_URL}models/supertonic-3`.replace(/\/{2,}/g, '/');
 
 /**
- * Flow-matching steps. Cost is linear, and on one WASM thread with fp32 this
- * is the throughput dial: 2 steps run at 1.79x realtime but clip, 4 at 1.11x
- * clean, 8 at 0.62x. Anything below 1.0x means synthesis loses to playback and
- * the reader stalls before every sentence, so 4 is the slowest setting that
- * still keeps up without a GPU.
+ * Flow-matching steps.
+ *
+ * Not a free throughput dial: below 8 the flow has not converged. On one seed,
+ * 4 steps peaks at 0.853 where 8 peaks at 0.292 and 16 at 0.308 — 8 and 16
+ * agree, 4 overshoots roughly threefold, and that overshoot is audible as
+ * artifacts on individual words. Dropping to 4 for speed traded away
+ * correctness and was reported as glitchy audio.
+ *
+ * 8 measures 1.04x realtime on four WASM threads, so it clears playback with
+ * cross-origin isolation enabled. 16 buys nothing audible for half the speed.
  */
-const DEFAULT_STEPS = 4;
+const DEFAULT_STEPS = 8;
 
 export type EngineStatus = 'idle' | 'loading' | 'ready' | 'failed';
 
