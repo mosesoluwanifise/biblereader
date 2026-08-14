@@ -54,6 +54,22 @@ Playwright needs its browsers once before `test:e2e`:
 npx playwright install
 ```
 
+## Hosting requirement
+
+The production host **must** send these two headers:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Without them `crossOriginIsolated` is false, `SharedArrayBuffer` is
+unavailable, and `onnxruntime-web` silently falls back to a single WASM
+thread. That was measured at roughly 4.6x slower than multi-threaded
+inference over identical weights — the difference between synthesis keeping
+up with playback and stalling before every sentence. The dev and preview
+servers set them via `vite.config.ts`; static hosts need their own config.
+
 ## Architecture
 
 - `src/services/bible/` — book catalog, text loading, offline cache

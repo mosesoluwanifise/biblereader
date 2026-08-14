@@ -18,6 +18,9 @@ const HOP = 512; // ae.base_chunk_size
 const LATENT_DIM = 24; // ae.ldim
 const COMPRESS = 6; // ttl.chunk_compress_factor
 
+/** Reference pipeline's default. Slightly faster than the raw prediction. */
+const SPEED = 1.05;
+
 type Graph = 'duration_predictor' | 'text_encoder' | 'vector_estimator' | 'vocoder';
 const GRAPHS: Graph[] = ['duration_predictor', 'text_encoder', 'vector_estimator', 'vocoder'];
 
@@ -131,10 +134,13 @@ async function synthesize(id: number, text: string, voiceId: string, steps: numb
     style_dp: style.dp,
     text_mask: textMask
   });
-  const predicted = Number((durationOut.duration.data as Float32Array)[0]);
+  const predicted = Number((durationOut.duration.data as Float32Array)[0]) / SPEED;
 
-  const frames = Math.max(1, Math.round((predicted * SAMPLE_RATE) / HOP));
-  const compressedFrames = Math.max(1, Math.ceil(frames / COMPRESS));
+  const targetSamples = Math.max(1, Math.round(predicted * SAMPLE_RATE));
+  // The latent grid is quantised to HOP * COMPRESS samples, so the vocoder
+  // always emits a whole number of chunks — up to one chunk longer than the
+  // duration actually predicted.
+  const compressedFrames = Math.max(1, Math.ceil(targetSamples / (HOP * COMPRESS)));
   const channels = LATENT_DIM * COMPRESS;
 
   const encoded = await sessions.get('text_encoder')!.run({
@@ -167,10 +173,15 @@ async function synthesize(id: number, text: string, voiceId: string, steps: numb
   const vocoded = await sessions.get('vocoder')!.run({ latent });
   const source = vocoded.wav_tts.data as Float32Array;
 
+  // Trim the grid padding. Leaving it in makes every utterance up to a chunk
+  // longer than predicted, which reads as unnatural drag at the end of each
+  // sentence and pushes word timings out of step with the audio.
+  const length = Math.min(source.length, targetSamples);
+
   // Copy into a plain buffer so it can be transferred; ONNX output may sit in
   // shared WASM memory, which is not transferable.
-  const samples = new Float32Array(source.length);
-  samples.set(source);
+  const samples = new Float32Array(length);
+  samples.set(source.subarray(0, length));
 
   post({ id, type: 'audio', audio: samples.buffer, sampleRate: SAMPLE_RATE, predicted }, [samples.buffer]);
 }

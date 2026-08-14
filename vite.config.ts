@@ -64,5 +64,28 @@ export default defineConfig({
   // onnxruntime-web ships prebuilt WASM; excluding it from dep optimization
   // keeps the dev server from rewriting the binary's loader paths.
   optimizeDeps: { exclude: ['onnxruntime-web'] },
-  server: { port: 3000, host: true }
+
+  /**
+   * Cross-origin isolation. Without these headers `crossOriginIsolated` is
+   * false, SharedArrayBuffer is unavailable, and onnxruntime-web silently
+   * drops to a single WASM thread — which is most of why our synthesis ran
+   * 4.6x slower than the reference pipeline over identical weights.
+   *
+   * Production hosting must send the same two headers; they are not part of
+   * the built assets. See README.
+   */
+  server: {
+    port: 3000,
+    host: true,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
+  },
+  preview: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
+  }
 });
