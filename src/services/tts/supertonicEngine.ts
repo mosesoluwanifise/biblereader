@@ -15,7 +15,15 @@ export { PRESET_VOICES, findVoice, DEFAULT_VOICE_ID } from './voices';
  */
 
 const MODEL_BASE = `${import.meta.env.BASE_URL}models/supertonic-3`.replace(/\/{2,}/g, '/');
-const DEFAULT_STEPS = 8;
+
+/**
+ * Flow-matching steps. Cost is linear, and on one WASM thread with fp32 this
+ * is the throughput dial: 2 steps run at 1.79x realtime but clip, 4 at 1.11x
+ * clean, 8 at 0.62x. Anything below 1.0x means synthesis loses to playback and
+ * the reader stalls before every sentence, so 4 is the slowest setting that
+ * still keeps up without a GPU.
+ */
+const DEFAULT_STEPS = 4;
 
 export type EngineStatus = 'idle' | 'loading' | 'ready' | 'failed';
 

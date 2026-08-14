@@ -117,7 +117,11 @@ async function generate({ name, steps, scale, integrate }) {
   console.log(`${name.padEnd(22)} peak ${peak.toFixed(3)}  rms ${rms.toFixed(4)}  clipped ${clipped}  ${(a.length / SR).toFixed(2)}s`);
 }
 
-await generate({ name: 'A-baseline-8step', steps: 8, scale: 1, integrate: false });
-await generate({ name: 'B-denorm-x4', steps: 8, scale: 4, integrate: false });
-await generate({ name: 'C-32step', steps: 32, scale: 1, integrate: false });
-await generate({ name: 'D-euler-integrate', steps: 8, scale: 1, integrate: true });
+// fp32 confirmed intelligible; B (denorm) and D (integrate) confirmed wrong.
+// Remaining question is purely the quality/latency tradeoff on step count.
+for (const steps of [2, 4, 8]) {
+  const t0 = Date.now();
+  await generate({ name: `fp32-${steps}step`, steps, scale: 1, integrate: false });
+  console.log(`  -> ${((Date.now() - t0) / 1000).toFixed(1)}s wall for ${seconds.toFixed(2)}s audio
+`);
+}

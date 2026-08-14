@@ -83,12 +83,31 @@ async function quantizationAvailable() {
   }
 }
 
+/**
+ * Quantization is opt-in (`--quantize`) and currently a bad trade.
+ *
+ * int8 shrinks the bundle from 380 MB to 102.7 MB, but on WASM it has no
+ * optimized kernels and dequantizes per operation: 0.08x realtime against
+ * fp32's 0.62x at eight flow steps, and it never clears realtime at any step
+ * count. Worse, listening tests found int8 output unintelligible where fp32 is
+ * clear — a difference that RMS comparison completely missed, because the
+ * energy is identical while the speech is destroyed.
+ *
+ * Keep the flag for measuring fp16 or a future static quantization, but fp32
+ * is what ships.
+ */
+const WANT_QUANTIZE = process.argv.includes('--quantize');
+
 async function main() {
   await mkdir(join(OUT, 'onnx'), { recursive: true });
   await mkdir(join(OUT, 'voice_styles'), { recursive: true });
 
-  const canQuantize = await quantizationAvailable();
-  console.log(`quantization: ${canQuantize ? 'int8 (onnxruntime)' : 'unavailable — shipping fp32'}\n`);
+  const canQuantize = WANT_QUANTIZE && (await quantizationAvailable());
+  console.log(
+    WANT_QUANTIZE
+      ? `quantization: ${canQuantize ? 'int8 (onnxruntime)' : 'requested but tooling unavailable — shipping fp32'}\n`
+      : 'quantization: off — shipping fp32 (int8 is slower and unintelligible; pass --quantize to override)\n'
+  );
 
   const files = [];
   const record = async (relative) => {
