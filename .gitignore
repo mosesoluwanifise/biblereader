@@ -46,3 +46,6 @@ venv/
 
 # Spike model downloads (~380 MB, re-fetchable from Hugging Face)
 spikes/**/models/
+
+# Spike audio output
+spikes/**/*.wav
