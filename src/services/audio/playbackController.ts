@@ -55,11 +55,19 @@ export class PlaybackController {
   private prefetch: Promise<Chunk | null> | null = null;
   private spoken: SpokenHandle | null = null;
 
-  private chunkStartedAt = 0;
-  private offsetWithinChunk = 0;
-  private current: Chunk | null = null;
   private rafId: number | null = null;
   private generation = 0;
+
+  /**
+   * Next free position on the AudioContext timeline.
+   *
+   * Sentences are scheduled contiguously against the audio clock rather than
+   * started from the previous buffer's `onended`. That callback fires a JS
+   * event-loop turn *after* the audio has ended, so starting there left a
+   * short silence at every join — audible as choppy, glitchy playback.
+   */
+  private nextStartAt = 0;
+  private scheduled: { chunk: Chunk; startAt: number; endAt: number; source: AudioBufferSourceNode }[] = [];
 
   getState(): PlaybackState {
     return this.state;
@@ -157,6 +165,10 @@ export class PlaybackController {
       if (generation !== this.generation) return;
       this.callbacks.onTier?.('supertonic');
 
+      const context = this.ensureContext();
+      this.nextStartAt = context.currentTime;
+      this.startWordClock(generation);
+
       while (this.cursor < this.sentences.length) {
         const chunk = this.prefetch ? await this.prefetch : await this.synthesize(this.cursor, generation);
         this.prefetch = null;
@@ -169,11 +181,17 @@ export class PlaybackController {
         const next = this.cursor + 1;
         this.prefetch = next < this.sentences.length ? this.synthesize(next, generation) : null;
 
-        await this.playChunk(chunk, generation);
-        if (generation !== this.generation) return;
+        this.scheduleChunk(chunk, generation);
         this.cursor += 1;
+
+        // Hand back control until this sentence is nearly over, leaving the
+        // next one time to be scheduled before the audio clock reaches it.
+        await this.waitUntil(this.nextStartAt - 0.3, generation);
+        if (generation !== this.generation) return;
       }
 
+      await this.waitUntil(this.nextStartAt, generation);
+      if (generation !== this.generation) return;
       this.finish(generation);
     } catch (err) {
       if (generation !== this.generation || err instanceof EngineCancelled) return;
@@ -230,29 +248,42 @@ export class PlaybackController {
     this.callbacks.onEnd?.();
   }
 
-  private playChunk(chunk: Chunk, generation: number): Promise<void> {
-    return new Promise((resolve) => {
-      const context = this.ensureContext();
-      this.current = chunk;
-      this.offsetWithinChunk = 0;
+  /** Queues a sentence at the next free slot on the audio clock. */
+  private scheduleChunk(chunk: Chunk, generation: number): void {
+    const context = this.ensureContext();
+    const startAt = Math.max(context.currentTime, this.nextStartAt);
 
-      const source = context.createBufferSource();
-      source.buffer = chunk.buffer;
-      source.connect(context.destination);
-      source.onended = () => {
-        if (generation !== this.generation) return;
-        if (this.source === source) this.source = null;
-        this.stopWordClock();
-        resolve();
-      };
+    const source = context.createBufferSource();
+    source.buffer = chunk.buffer;
+    source.connect(context.destination);
+    source.start(startAt);
 
-      this.source = source;
-      this.chunkStartedAt = context.currentTime;
-      source.start();
+    const endAt = startAt + chunk.buffer.duration;
+    this.scheduled.push({ chunk, startAt, endAt, source });
+    this.nextStartAt = endAt;
 
+    if (generation === this.generation) {
       this.setState('playing');
       this.callbacks.onSentence?.(this.cursor, this.sentences.length);
-      this.startWordClock(generation);
+    }
+  }
+
+  /**
+   * Resolves when the audio clock reaches `when`. Polls rather than using a
+   * single timer because the clock stops while the context is suspended, so a
+   * wall-clock timer would fire early after a pause.
+   */
+  private waitUntil(when: number, generation: number): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (generation !== this.generation) return resolve();
+        const context = this.context;
+        if (!context) return resolve();
+        const remaining = when - context.currentTime;
+        if (remaining <= 0) return resolve();
+        setTimeout(check, Math.min(200, Math.max(20, remaining * 1000)));
+      };
+      check();
     });
   }
 
@@ -261,22 +292,31 @@ export class PlaybackController {
     let lastIndex = -2;
 
     const tick = () => {
-      if (generation !== this.generation || !this.current || !this.context) return;
-      const elapsed = this.context.currentTime - this.chunkStartedAt + this.offsetWithinChunk;
+      if (generation !== this.generation || !this.context) return;
+      const now = this.context.currentTime;
 
-      let active = -1;
-      for (let i = 0; i < this.current.words.length; i += 1) {
-        if (elapsed >= this.current.words[i].start && elapsed < this.current.words[i].end) {
-          active = i;
-          break;
+      // Which scheduled sentence is audible right now.
+      const entry = this.scheduled.find((s) => now >= s.startAt && now < s.endAt);
+      if (entry) {
+        const elapsed = now - entry.startAt;
+        const words = entry.chunk.words;
+        let active = -1;
+        for (let i = 0; i < words.length; i += 1) {
+          if (elapsed >= words[i].start && elapsed < words[i].end) {
+            active = i;
+            break;
+          }
         }
-      }
-
-      if (active !== -1) {
-        const globalIndex = this.current.wordOffset + active;
-        if (globalIndex !== lastIndex) {
-          lastIndex = globalIndex;
-          this.callbacks.onWord?.(globalIndex);
+        if (active !== -1) {
+          const globalIndex = entry.chunk.wordOffset + active;
+          if (globalIndex !== lastIndex) {
+            lastIndex = globalIndex;
+            this.callbacks.onWord?.(globalIndex);
+          }
+        }
+        // Sentences already finished cannot become audible again.
+        if (this.scheduled.length > 4) {
+          this.scheduled = this.scheduled.filter((s) => s.endAt > now - 1);
         }
       }
       this.rafId = requestAnimationFrame(tick);
@@ -292,10 +332,13 @@ export class PlaybackController {
     }
   }
 
-  /** Suspends without losing position. */
+  /**
+   * Suspends without losing position. Suspending stops the AudioContext clock,
+   * so scheduled start times stay valid relative to it and resume continues
+   * exactly where it left off — no bookkeeping required.
+   */
   async pause(): Promise<void> {
     if (this.state !== 'playing' || !this.context) return;
-    this.offsetWithinChunk += this.context.currentTime - this.chunkStartedAt;
     await this.context.suspend();
     this.stopWordClock();
     this.setState('paused');
@@ -304,7 +347,6 @@ export class PlaybackController {
   async resume(): Promise<void> {
     if (this.state !== 'paused' || !this.context) return;
     await this.context.resume();
-    this.chunkStartedAt = this.context.currentTime;
     this.setState('playing');
     this.startWordClock(this.generation);
   }
@@ -320,22 +362,23 @@ export class PlaybackController {
     this.spoken?.cancel();
     this.spoken = null;
 
-    if (this.source) {
-      this.source.onended = null;
+    // Everything queued ahead on the audio clock must be cancelled too, or
+    // sentences scheduled into the future keep playing after stop.
+    for (const entry of this.scheduled) {
       try {
-        this.source.stop();
+        entry.source.stop();
       } catch {
-        /* already stopped */
+        /* already stopped or never started */
       }
-      this.source = null;
+      entry.source.disconnect();
     }
+    this.scheduled = [];
 
     if (this.context && this.context.state === 'suspended') void this.context.resume();
 
-    this.current = null;
     this.prefetch = null;
     this.cursor = 0;
-    this.offsetWithinChunk = 0;
+    this.nextStartAt = 0;
     this.setState('idle');
   }
 }

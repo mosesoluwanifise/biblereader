@@ -97,10 +97,23 @@ describe('splitSentences', () => {
     expect(s[0]).toBe('In the beginning God created.');
   });
 
-  it('treats colons and semicolons as breaks, as scripture uses them', () => {
-    const s = splitSentences('The LORD is my shepherd; I shall not want.');
-    expect(s).toHaveLength(2);
-    expect(s[0]).toBe('The LORD is my shepherd;');
+  it('keeps clauses with their sentence rather than splitting on ; or :', () => {
+    // Splitting here used to sound broken: each fragment is synthesized as a
+    // standalone utterance, so "Let there be light:" got a full falling cadence
+    // and a trailing pause before "and there was light."
+    expect(splitSentences('The LORD is my shepherd; I shall not want.')).toEqual([
+      'The LORD is my shepherd; I shall not want.'
+    ]);
+    expect(splitSentences('And God said, Let there be light: and there was light.')).toEqual([
+      'And God said, Let there be light: and there was light.'
+    ]);
+  });
+
+  it('still uses weaker breaks when a sentence exceeds the cap', () => {
+    const long = `${'word '.repeat(30).trim()}; ${'other '.repeat(30).trim()}.`;
+    const parts = splitSentences(long, 100);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) expect(p.length).toBeLessThanOrEqual(100);
   });
 
   it('keeps every chunk within the length cap', () => {

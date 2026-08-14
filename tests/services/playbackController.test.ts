@@ -11,18 +11,31 @@ import { interpolateWordTimings } from '../../src/services/tts/wordTiming';
 
 /** Minimal AudioContext double. Sources finish when we say they do. */
 class FakeAudioContext {
-  currentTime = 0;
+  /** 1:1 with wall clock — the controller's lookahead is in real seconds. */
+  static SPEEDUP = 1;
   state: 'running' | 'suspended' | 'closed' = 'running';
   destination = {};
   static live: FakeAudioContext[] = [];
   sources: FakeSource[] = [];
+  private origin = Date.now();
+  private frozenAt: number | null = null;
 
   constructor() {
     FakeAudioContext.live.push(this);
   }
 
+  get currentTime(): number {
+    const ms = (this.frozenAt ?? Date.now()) - this.origin;
+    return (ms / 1000) * FakeAudioContext.SPEEDUP;
+  }
+
+  /** Start times the controller scheduled, in order. */
+  get startTimes(): number[] {
+    return this.sources.filter((s) => s.started).map((s) => s.startAt);
+  }
+
   createBuffer(_channels: number, length: number, sampleRate: number) {
-    return { length, sampleRate, copyToChannel: vi.fn() };
+    return { length, sampleRate, duration: length / sampleRate, copyToChannel: vi.fn() };
   }
 
   createBufferSource() {
@@ -33,9 +46,14 @@ class FakeAudioContext {
 
   async suspend() {
     this.state = 'suspended';
+    this.frozenAt = Date.now();
   }
 
   async resume() {
+    if (this.frozenAt !== null) {
+      this.origin += Date.now() - this.frozenAt;
+      this.frozenAt = null;
+    }
     this.state = 'running';
   }
 
@@ -47,14 +65,17 @@ class FakeAudioContext {
 }
 
 class FakeSource {
-  buffer: unknown = null;
+  buffer: { duration: number } | null = null;
   onended: (() => void) | null = null;
   started = false;
   ended = false;
+  startAt = 0;
   constructor(private context: FakeAudioContext) {}
   connect() {}
-  start() {
+  disconnect() {}
+  start(when = 0) {
     this.started = true;
+    this.startAt = when;
   }
   stop() {
     this.ended = true;
@@ -67,18 +88,15 @@ class FakeSource {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-async function drain(context: FakeAudioContext, times: number): Promise<void> {
-  for (let i = 0; i < times; i += 1) {
-    await flush();
-    context.finishCurrent();
-    await flush();
-  }
+/** Waits for the controller to settle; the fast audio clock does the rest. */
+async function settle(ms = 400): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
 }
 
 beforeEach(() => {
   FakeAudioContext.live = [];
   vi.stubGlobal('AudioContext', FakeAudioContext);
-  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(0), 1000) as unknown as number);
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(0), 16) as unknown as number);
   vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
 
   vi.spyOn(supertonicEngine, 'isReady').mockReturnValue(true);
@@ -86,7 +104,7 @@ beforeEach(() => {
   vi.spyOn(supertonicEngine, 'synthesizeSentence').mockImplementation(async (text: string) => ({
     audio: new Float32Array(4410),
     sampleRate: 44100,
-    duration: 1,
+    duration: 0.1,
     words: interpolateWordTimings(text, 1)
   }));
 });
@@ -159,9 +177,8 @@ describe('sentence sequencing', () => {
       onSentence: (index) => seen.push(index)
     });
 
-    await flush();
+    await settle();
     const context = FakeAudioContext.live[0];
-    await drain(context, 3);
 
     expect(supertonicEngine.synthesizeSentence).toHaveBeenCalledTimes(3);
     const texts = (supertonicEngine.synthesizeSentence as unknown as { mock: { calls: string[][] } }).mock.calls.map(
@@ -169,6 +186,14 @@ describe('sentence sequencing', () => {
     );
     expect(texts).toEqual(['First one.', 'Second one.', 'Third one.']);
     expect(seen).toEqual([0, 1, 2]);
+
+    // The point of scheduling against the audio clock: each sentence begins
+    // exactly where the previous one ended, with no gap to hear.
+    const starts = context.startTimes;
+    expect(starts).toHaveLength(3);
+    for (let i = 1; i < starts.length; i += 1) {
+      expect(starts[i] - starts[i - 1]).toBeCloseTo(0.1, 5);
+    }
   });
 
   it('calls onEnd once the passage finishes', async () => {
@@ -176,8 +201,7 @@ describe('sentence sequencing', () => {
     const controller = new PlaybackController();
     controller.start('One. Two.', 'F1', { onEnd });
 
-    await flush();
-    await drain(FakeAudioContext.live[0], 2);
+    await settle();
 
     expect(onEnd).toHaveBeenCalledTimes(1);
   });
@@ -190,9 +214,12 @@ describe('sentence sequencing', () => {
 
     await flush();
     await flush();
-    await new Promise((r) => setTimeout(r, 1100));
+    await settle(300);
 
-    expect(words.every((w) => w >= 100)).toBe(true);
+    // -1 is the clear-highlight signal emitted when the passage ends.
+    const highlights = words.filter((w) => w !== -1);
+    expect(highlights.length).toBeGreaterThan(0);
+    expect(highlights.every((w) => w >= 100)).toBe(true);
   });
 });
 
@@ -203,13 +230,15 @@ describe('stop', () => {
     controller.start('One. Two. Three.', 'F1', { onEnd });
     await flush();
 
+    const context = FakeAudioContext.live[0];
     controller.stop();
     expect(controller.getState()).toBe('idle');
 
-    // Finishing the abandoned source must not advance the stopped run.
-    FakeAudioContext.live[0].finishCurrent();
-    await flush();
-    await flush();
+    // Anything queued ahead on the audio clock must be cancelled, or future
+    // sentences keep playing after stop.
+    expect(context.sources.filter((s) => s.started).every((s) => s.ended)).toBe(true);
+
+    await settle(200);
     expect(onEnd).not.toHaveBeenCalled();
   });
 
@@ -221,8 +250,7 @@ describe('stop', () => {
     controller.start('One. Two.', 'F1', { onSentence: first });
     await flush();
     controller.start('Alpha. Beta.', 'F1', { onSentence: second });
-    await flush();
-    await drain(FakeAudioContext.live[0], 2);
+    await settle();
 
     expect(second).toHaveBeenCalled();
   });

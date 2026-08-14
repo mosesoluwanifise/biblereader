@@ -86,19 +86,26 @@ export function splitSentences(text: string, maxChars = 240): string[] {
   if (normalized.length === 0) return [];
 
   const sentences: string[] = [];
-  // Break after ., !, ? or a colon followed by a space. Scripture uses colons
-  // and semicolons as major clause breaks, which are natural breath points.
-  const parts = normalized.split(/(?<=[.!?:;])\s+/);
+  // Split only on sentence-final punctuation.
+  //
+  // An earlier version also split on colons and semicolons, reasoning that
+  // Scripture uses them as breath points. It sounded broken: each fragment is
+  // synthesized as a standalone utterance, so "And God said, Let there be
+  // light:" got a full falling cadence and a trailing pause before "and there
+  // was light." Clauses have to stay with their sentence for the model to
+  // phrase them as one thought.
+  const parts = normalized.split(/(?<=[.!?])\s+/);
 
   for (const part of parts) {
     if (part.length <= maxChars) {
       if (part.trim()) sentences.push(part.trim());
       continue;
     }
-    // Over-long clause: fall back to comma breaks, then hard word wrapping, so
-    // a single unpunctuated verse cannot produce a minutes-long utterance.
+    // Over-long sentence: fall back to the weaker breaks we no longer split on
+    // by default, then to hard word wrapping, so a single unpunctuated verse
+    // cannot produce a minutes-long utterance.
     let buffer = '';
-    for (const clause of part.split(/(?<=,)\s+/)) {
+    for (const clause of part.split(/(?<=[;:,])\s+/)) {
       for (const word of clause.split(' ')) {
         if (buffer.length + word.length + 1 > maxChars && buffer) {
           sentences.push(buffer.trim());
