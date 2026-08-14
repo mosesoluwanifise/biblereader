@@ -1,12 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { BibleView } from './components/BibleView';
 import { AudioControls } from './components/AudioControls';
 import { VoiceSelector } from './components/VoiceSelector';
-import { TranslationCode } from './services/bible/types';
+import { ChapterResult, TranslationCode, Verse } from './services/bible/types';
 import { VoiceOption } from './services/tts/types';
 import { PRESET_VOICES, supertonicEngine } from './services/tts/supertonicEngine';
-import { getNextChapter, loadChapter, countWords } from './services/bible/bibleService';
+import { getNextChapter, loadChapter, computeVerseOffsets } from './services/bible/bibleService';
+import { playbackController, PlaybackState } from './services/audio/playbackController';
+
+type ChapterState =
+  | { status: 'loading' }
+  | { status: 'loaded'; verses: Verse[] }
+  | { status: 'error'; message: string; retryable: boolean };
 
 export const App: React.FC = () => {
   const [translation, setTranslation] = useState<TranslationCode>('KJV');
@@ -14,115 +20,124 @@ export const App: React.FC = () => {
   const [chapter, setChapter] = useState<number>(1);
   const [currentVoice, setCurrentVoice] = useState<VoiceOption>(PRESET_VOICES[0]);
 
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [chapterState, setChapterState] = useState<ChapterState>({ status: 'loading' });
+  const [reloadToken, setReloadToken] = useState(0);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
   const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
-  const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState<boolean>(false);
+  const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState(false);
+  const [engineError, setEngineError] = useState<string | null>(null);
 
-  // Instantly stop audio whenever passage, translation, or voice selection changes
+  /** Set when auto-advance moves the passage, so the effect resumes playback. */
+  const continuePlaying = useRef(false);
+
+  // Chapter text is held here rather than inside the reader so that pressing
+  // play never has to await a load — the iOS user-gesture chain cannot survive
+  // an await before audio starts.
   useEffect(() => {
-    supertonicEngine.stop();
-    setIsPlaying(false);
-    setActiveWordIndex(-1);
-  }, [translation, book, chapter, currentVoice]);
+    let active = true;
+    setChapterState({ status: 'loading' });
 
-  // R11 Position Preservation: Maintain current book & chapter when switching translation
-  const handleSelectTranslation = (newTranslation: TranslationCode) => {
-    supertonicEngine.stop();
-    setIsPlaying(false);
-    setActiveWordIndex(-1);
-    setTranslation(newTranslation);
-  };
+    loadChapter(book, chapter, translation).then((result: ChapterResult) => {
+      if (!active) return;
+      if (result.ok) {
+        setChapterState({ status: 'loaded', verses: result.verses });
+      } else {
+        continuePlaying.current = false;
+        setChapterState({ status: 'error', message: result.message, retryable: result.reason === 'unavailable' });
+      }
+    });
 
-  const handleTogglePlay = async () => {
-    if (isPlaying) {
-      supertonicEngine.stop();
-      setIsPlaying(false);
-      setActiveWordIndex(-1);
+    return () => {
+      active = false;
+    };
+  }, [book, chapter, translation, reloadToken]);
+
+  const verses = chapterState.status === 'loaded' ? chapterState.verses : [];
+
+  const beginPlayback = useCallback(
+    (fromVerse?: number) => {
+      if (chapterState.status !== 'loaded') return;
+
+      const selected = fromVerse ? chapterState.verses.filter((v) => v.verse >= fromVerse) : chapterState.verses;
+      if (selected.length === 0) return;
+
+      const offsets = computeVerseOffsets(chapterState.verses);
+      const startIndex = fromVerse ? chapterState.verses.findIndex((v) => v.verse >= fromVerse) : 0;
+      const startWordOffset = startIndex >= 0 ? offsets[startIndex] : 0;
+
+      setEngineError(null);
+      setActiveWordIndex(startWordOffset);
+
+      playbackController.start(
+        selected.map((v) => v.text).join(' '),
+        currentVoice.id,
+        {
+          onWord: setActiveWordIndex,
+          onStateChange: setPlaybackState,
+          onError: (message) => {
+            setEngineError(message);
+            setActiveWordIndex(-1);
+          },
+          onEnd: () => {
+            setActiveWordIndex(-1);
+            // R4: hand off to the next chapter by moving the passage and
+            // flagging intent. The effect below restarts playback once the new
+            // text has loaded — no timer, and no stale closure to capture.
+            const next = getNextChapter(book, chapter);
+            if (!next) return;
+            continuePlaying.current = true;
+            setBook(next.book);
+            setChapter(next.chapter);
+          }
+        },
+        startWordOffset
+      );
+    },
+    [chapterState, currentVoice.id, book, chapter]
+  );
+
+  // Resumes playback after auto-advance, once the next chapter's text is in.
+  useEffect(() => {
+    if (!continuePlaying.current) return;
+    if (chapterState.status !== 'loaded') return;
+    continuePlaying.current = false;
+    beginPlayback();
+  }, [chapterState, beginPlayback]);
+
+  const handleTogglePlay = () => {
+    if (playbackState === 'playing') {
+      void playbackController.pause();
       return;
     }
-
-    const result = await loadChapter(book, chapter, translation);
-    if (!result.ok) {
-      setIsPlaying(false);
+    if (playbackState === 'paused') {
+      void playbackController.resume();
       return;
     }
-    const text = result.verses.map((v) => v.text).join(' ');
-
-    setIsPlaying(true);
-
-    supertonicEngine.speakText(
-      text,
-      currentVoice.id,
-      0, // Start from beginning of chapter
-      (wordIdx) => {
-        setActiveWordIndex(wordIdx);
-      },
-      () => {
-        setIsPlaying(false);
-        setActiveWordIndex(-1);
-        handleAutoAdvance();
-      }
-    );
-  };
-
-  // Click-to-Start Reading from selected verse
-  const handleSelectVerseToRead = async (startVerseNumber: number) => {
-    supertonicEngine.stop();
-    setIsPlaying(false);
-    setActiveWordIndex(-1);
-
-    const result = await loadChapter(book, chapter, translation);
-    if (!result.ok) return;
-
-    const selectedVerses = result.verses.filter((v) => v.verse >= startVerseNumber);
-    const textToRead = selectedVerses.map((v) => v.text).join(' ');
-
-    let startWordOffset = 0;
-    for (const v of result.verses) {
-      if (v.verse >= startVerseNumber) break;
-      startWordOffset += countWords(v.text);
-    }
-
-    setIsPlaying(true);
-    setActiveWordIndex(startWordOffset);
-
-    supertonicEngine.speakText(
-      textToRead,
-      currentVoice.id,
-      startWordOffset,
-      (wordIdx) => {
-        setActiveWordIndex(wordIdx);
-      },
-      () => {
-        setIsPlaying(false);
-        setActiveWordIndex(-1);
-        handleAutoAdvance();
-      }
-    );
+    beginPlayback();
   };
 
   const handleRestart = () => {
-    supertonicEngine.stop();
-    setIsPlaying(false);
+    playbackController.stop();
     setActiveWordIndex(-1);
   };
 
-  // R4: continuous playback across chapters and book boundaries.
-  // U8 replaces this with effect-driven advance; the setTimeout below still
-  // reads a stale `handleTogglePlay` closure and is a known defect until then.
-  const handleAutoAdvance = () => {
-    const next = getNextChapter(book, chapter);
-    if (!next) return;
-    setBook(next.book);
-    setChapter(next.chapter);
+  const stopForNavigation = () => {
+    continuePlaying.current = false;
+    playbackController.stop();
+    setActiveWordIndex(-1);
+  };
+
+  const handleSelectTranslation = (next: TranslationCode) => {
+    stopForNavigation();
+    setTranslation(next); // R11: book and chapter are preserved.
   };
 
   const handleSelectVoice = (voice: VoiceOption) => {
-    supertonicEngine.stop();
-    setIsPlaying(false);
-    setActiveWordIndex(-1);
+    stopForNavigation();
     setCurrentVoice(voice);
   };
+
+  useEffect(() => () => playbackController.stop(), []);
 
   return (
     <div className="app-container">
@@ -137,26 +152,27 @@ export const App: React.FC = () => {
         translation={translation}
         book={book}
         chapter={chapter}
+        state={chapterState}
+        onRetry={() => setReloadToken((n) => n + 1)}
         onSelectBook={(newBook) => {
-          supertonicEngine.stop();
-          setIsPlaying(false);
-          setActiveWordIndex(-1);
+          stopForNavigation();
           setBook(newBook);
         }}
         onSelectChapter={(newChapter) => {
-          supertonicEngine.stop();
-          setIsPlaying(false);
-          setActiveWordIndex(-1);
+          stopForNavigation();
           setChapter(newChapter);
         }}
         activeWordIndex={activeWordIndex}
-        onSelectVerseToRead={handleSelectVerseToRead}
+        onSelectVerseToRead={(verse) => beginPlayback(verse)}
       />
 
       <AudioControls
         passageTitle={`${book} ${chapter} (${translation})`}
         voice={currentVoice}
-        isPlaying={isPlaying}
+        playbackState={playbackState}
+        engineStatus={supertonicEngine.getStatus()}
+        errorMessage={engineError}
+        disabled={verses.length === 0}
         onTogglePlay={handleTogglePlay}
         onRestart={handleRestart}
         onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}

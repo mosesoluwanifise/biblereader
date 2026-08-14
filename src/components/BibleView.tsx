@@ -1,61 +1,42 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { AlertCircle, RefreshCw } from 'lucide-react';
-import { ChapterResult, TranslationCode, Verse } from '../services/bible/types';
-import {
-  BIBLE_BOOKS,
-  getAvailableChapters,
-  loadChapter,
-  computeVerseOffsets
-} from '../services/bible/bibleService';
+import { TranslationCode, Verse } from '../services/bible/types';
+import { BIBLE_BOOKS, getAvailableChapters, computeVerseOffsets } from '../services/bible/bibleService';
 import { HighlightedVerse } from './HighlightedVerse';
+
+export type ChapterViewState =
+  | { status: 'loading' }
+  | { status: 'loaded'; verses: Verse[] }
+  | { status: 'error'; message: string; retryable: boolean };
 
 interface BibleViewProps {
   translation: TranslationCode;
   book: string;
   chapter: number;
+  state: ChapterViewState;
+  onRetry: () => void;
   onSelectBook: (b: string) => void;
   onSelectChapter: (c: number) => void;
   activeWordIndex: number;
   onSelectVerseToRead?: (verseNumber: number) => void;
 }
 
-type LoadState =
-  | { status: 'loading' }
-  | { status: 'loaded'; verses: Verse[] }
-  | { status: 'error'; message: string; retryable: boolean };
-
+/**
+ * Presentational. Chapter text is owned by App so that starting playback never
+ * has to await a load — see the gesture note there.
+ */
 export const BibleView: React.FC<BibleViewProps> = ({
   translation,
   book,
   chapter,
+  state,
+  onRetry,
   onSelectBook,
   onSelectChapter,
   activeWordIndex,
   onSelectVerseToRead
 }) => {
-  const [state, setState] = useState<LoadState>({ status: 'loading' });
-  const [reloadToken, setReloadToken] = useState(0);
-
   const chapters = getAvailableChapters(book);
-
-  useEffect(() => {
-    let active = true;
-    setState({ status: 'loading' });
-
-    loadChapter(book, chapter, translation).then((result: ChapterResult) => {
-      if (!active) return;
-      if (result.ok) {
-        setState({ status: 'loaded', verses: result.verses });
-      } else {
-        setState({ status: 'error', message: result.message, retryable: result.reason === 'unavailable' });
-      }
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [book, chapter, translation, reloadToken]);
-
   const verses = state.status === 'loaded' ? state.verses : [];
   const verseOffsets = computeVerseOffsets(verses);
 
@@ -118,7 +99,7 @@ export const BibleView: React.FC<BibleViewProps> = ({
           <AlertCircle size={20} aria-hidden="true" />
           <p>{state.message}</p>
           {state.retryable && (
-            <button className="btn btn-secondary" onClick={() => setReloadToken((n) => n + 1)}>
+            <button className="btn btn-secondary" onClick={onRetry}>
               <RefreshCw size={14} aria-hidden="true" />
               <span>Try again</span>
             </button>
