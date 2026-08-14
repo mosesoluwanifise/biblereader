@@ -10,40 +10,48 @@ yet built is marked as such. The V1 target is defined in
 | --- | --- |
 | Bible text catalog (66 books, chapter bounds) | Built |
 | Test harness (Vitest + Playwright) | Built |
-| Bundled Bible text (KJV / WEB / ASV) | Not built — U2 |
-| Local-first text service with offline cache | Not built — U3 |
-| Voice cloning removal | Not built — U4 |
-| Supertonic ONNX synthesis | Not built — U5, U6, U11 |
+| Bundled Bible text (KJV / WEB / ASV) | Built |
+| Local-first text service with offline cache | Built |
+| Voice cloning removal | Done |
+| Supertonic ONNX synthesis | Not built — U11, U5, U6 |
 | Word-level timing | Not built — U7 |
 | Playback controller (pause/resume, auto-advance) | Broken — U8 |
 | Reading position, auto-scroll | Not built — U9 |
 | PWA install, offline caching, MediaSession | Broken — U10 |
 
-## Known defects at the baseline commit
+Speech still runs on `window.speechSynthesis`. Until U6 lands, the
+playback defects listed below are live.
 
-These are real and reproducible on `main` as imported. They are the reason V1
-is a rebuild rather than an increment.
+## Defects still open
 
 - `SupertonicEngine` is `window.speechSynthesis` with pitch and rate offsets.
-  It performs no ONNX inference; `onnxruntime-web` is a dependency with no
-  imports. The ten "preset voices" collapse onto whatever one to three voices
-  the host OS provides.
-- Voice cloning processes no audio. The backend assigns a UUID and stores a
-  dict; cloned voices fall through to the default system voice at playback.
-- Chapter text is fetched live from `bible-api.com` on every cache miss. The
-  fallback path parses `data.verses` from a source that returns `data`, so it
-  has never succeeded.
-- Auto-advance calls `setChapter` and then invokes a `handleTogglePlay`
-  captured from the previous render. It re-reads the prior chapter
-  indefinitely while the UI displays the next one.
+  It performs no ONNX inference. The ten "preset voices" collapse onto
+  whatever one to three voices the host OS provides. U6 replaces this with
+  real inference over the ten shipped voice styles.
+- Auto-advance sets the next chapter and then invokes a `handleTogglePlay`
+  captured from the previous render, so it replays the prior chapter while the
+  UI shows the next one. U8 replaces the timer with effect-driven advance.
 - Pause calls `speechSynthesis.cancel()`, which discards position. Resuming
-  restarts the chapter.
-- The play path awaits a network fetch before speaking, which severs the iOS
-  user-gesture chain, so playback never starts on iOS Safari.
-- The manifest references icons that do not exist in any directory, so the
-  browser install gate fails and the app is not installable.
-- The service worker precaches five build assets. No Bible text or model asset
-  is cached, so there is no offline support.
+  restarts the chapter. U8.
+- The play path awaits chapter text before speaking, severing the iOS
+  user-gesture chain, so playback never starts on iOS Safari. U8.
+- The manifest references icons that exist in no directory, so the browser
+  install gate fails and the app is not installable. U10.
+- The service worker precaches five build assets and no Bible text, so the
+  offline guarantee depends entirely on the IndexedDB layer today. U10.
+
+## Defects fixed
+
+- Chapter text was fetched live from `bible-api.com` on every cache miss, and
+  its fallback parsed `data.verses` from a source that returns `data` — that
+  path had never once succeeded. Text now loads from bundled assets.
+- Load failure returned an empty array, which the reader rendered as a blank
+  screen indistinguishable from a real empty chapter. Failure is now a typed
+  result with a visible, retryable error state.
+- Chapter advance dead-ended at the last chapter of every book instead of
+  crossing into the next one.
+- The upstream text source emits every verse twice. Ingest deduplicates, and
+  fails loudly if duplicate rows ever disagree.
 
 ## Bible text
 
