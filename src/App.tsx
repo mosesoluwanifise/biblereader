@@ -6,7 +6,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { TranslationCode } from './services/bible/types';
 import { VoiceOption } from './services/tts/types';
 import { PRESET_VOICES, supertonicEngine } from './services/tts/supertonicEngine';
-import { getAvailableChapters, fetchChapterVersesAsync } from './services/bible/bibleService';
+import { getNextChapter, loadChapter, countWords } from './services/bible/bibleService';
 
 export const App: React.FC = () => {
   const [translation, setTranslation] = useState<TranslationCode>('KJV');
@@ -41,13 +41,12 @@ export const App: React.FC = () => {
       return;
     }
 
-    const verses = await fetchChapterVersesAsync(book, chapter, translation);
-    const text = verses.map(v => v.text).join(' ');
-
-    if (!text) {
+    const result = await loadChapter(book, chapter, translation);
+    if (!result.ok) {
       setIsPlaying(false);
       return;
     }
+    const text = result.verses.map((v) => v.text).join(' ');
 
     setIsPlaying(true);
 
@@ -72,21 +71,16 @@ export const App: React.FC = () => {
     setIsPlaying(false);
     setActiveWordIndex(-1);
 
-    const verses = await fetchChapterVersesAsync(book, chapter, translation);
-    if (!verses || verses.length === 0) return;
+    const result = await loadChapter(book, chapter, translation);
+    if (!result.ok) return;
 
-    // Filter verses starting from selected verse number
-    const selectedVerses = verses.filter(v => v.verse >= startVerseNumber);
-    const textToRead = selectedVerses.map(v => v.text).join(' ');
+    const selectedVerses = result.verses.filter((v) => v.verse >= startVerseNumber);
+    const textToRead = selectedVerses.map((v) => v.text).join(' ');
 
-    // Calculate word offset of startVerseNumber in chapter
     let startWordOffset = 0;
-    for (const v of verses) {
-      if (v.verse < startVerseNumber) {
-        startWordOffset += v.text.trim().split(/\s+/).length;
-      } else {
-        break;
-      }
+    for (const v of result.verses) {
+      if (v.verse >= startVerseNumber) break;
+      startWordOffset += countWords(v.text);
     }
 
     setIsPlaying(true);
@@ -113,16 +107,14 @@ export const App: React.FC = () => {
     setActiveWordIndex(-1);
   };
 
-  // R4: Continuous playback auto-advance across chapters
+  // R4: continuous playback across chapters and book boundaries.
+  // U8 replaces this with effect-driven advance; the setTimeout below still
+  // reads a stale `handleTogglePlay` closure and is a known defect until then.
   const handleAutoAdvance = () => {
-    const chapters = getAvailableChapters(book);
-    const nextIndex = chapters.indexOf(chapter) + 1;
-    if (nextIndex < chapters.length) {
-      setChapter(chapters[nextIndex]);
-      setTimeout(() => {
-        handleTogglePlay();
-      }, 500);
-    }
+    const next = getNextChapter(book, chapter);
+    if (!next) return;
+    setBook(next.book);
+    setChapter(next.chapter);
   };
 
   const handleSelectVoice = (voice: VoiceOption) => {

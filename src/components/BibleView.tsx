@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { TranslationCode, Verse } from '../services/bible/types';
-import { BIBLE_BOOKS, getAvailableChapters, fetchChapterVersesAsync } from '../services/bible/bibleService';
+import { AlertCircle, RefreshCw } from 'lucide-react';
+import { ChapterResult, TranslationCode, Verse } from '../services/bible/types';
+import {
+  BIBLE_BOOKS,
+  getAvailableChapters,
+  loadChapter,
+  computeVerseOffsets
+} from '../services/bible/bibleService';
 import { HighlightedVerse } from './HighlightedVerse';
 
 interface BibleViewProps {
@@ -13,6 +19,11 @@ interface BibleViewProps {
   onSelectVerseToRead?: (verseNumber: number) => void;
 }
 
+type LoadState =
+  | { status: 'loading' }
+  | { status: 'loaded'; verses: Verse[] }
+  | { status: 'error'; message: string; retryable: boolean };
+
 export const BibleView: React.FC<BibleViewProps> = ({
   translation,
   book,
@@ -22,57 +33,57 @@ export const BibleView: React.FC<BibleViewProps> = ({
   activeWordIndex,
   onSelectVerseToRead
 }) => {
-  const [verses, setVerses] = useState<Verse[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const [reloadToken, setReloadToken] = useState(0);
 
   const chapters = getAvailableChapters(book);
 
   useEffect(() => {
-    let isMounted = true;
-    setIsLoading(true);
+    let active = true;
+    setState({ status: 'loading' });
 
-    fetchChapterVersesAsync(book, chapter, translation).then((loadedVerses) => {
-      if (isMounted) {
-        setVerses(loadedVerses);
-        setIsLoading(false);
+    loadChapter(book, chapter, translation).then((result: ChapterResult) => {
+      if (!active) return;
+      if (result.ok) {
+        setState({ status: 'loaded', verses: result.verses });
+      } else {
+        setState({ status: 'error', message: result.message, retryable: result.reason === 'unavailable' });
       }
     });
 
     return () => {
-      isMounted = false;
+      active = false;
     };
-  }, [book, chapter, translation]);
+  }, [book, chapter, translation, reloadToken]);
 
-  // Compute word offsets per verse for global index matching
-  let cumulativeWordOffset = 0;
-  const verseOffsets = verses.map(v => {
-    const offset = cumulativeWordOffset;
-    const wordCount = v.text.trim().split(/\s+/).length;
-    cumulativeWordOffset += wordCount;
-    return offset;
-  });
+  const verses = state.status === 'loaded' ? state.verses : [];
+  const verseOffsets = computeVerseOffsets(verses);
 
   return (
     <div className="reader-container">
-      {/* Navigation Bar */}
       <div className="nav-bar">
         <div className="navigation-selectors">
           <select
             className="select-input"
             value={book}
+            aria-label="Book"
             onChange={(e) => {
               onSelectBook(e.target.value);
               onSelectChapter(1);
             }}
           >
             <optgroup label="Old Testament">
-              {BIBLE_BOOKS.filter(b => b.category === 'OT').map(b => (
-                <option key={b.name} value={b.name}>{b.name}</option>
+              {BIBLE_BOOKS.filter((b) => b.category === 'OT').map((b) => (
+                <option key={b.name} value={b.name}>
+                  {b.name}
+                </option>
               ))}
             </optgroup>
             <optgroup label="New Testament">
-              {BIBLE_BOOKS.filter(b => b.category === 'NT').map(b => (
-                <option key={b.name} value={b.name}>{b.name}</option>
+              {BIBLE_BOOKS.filter((b) => b.category === 'NT').map((b) => (
+                <option key={b.name} value={b.name}>
+                  {b.name}
+                </option>
               ))}
             </optgroup>
           </select>
@@ -80,27 +91,42 @@ export const BibleView: React.FC<BibleViewProps> = ({
           <select
             className="select-input"
             value={chapter}
+            aria-label="Chapter"
             onChange={(e) => onSelectChapter(Number(e.target.value))}
           >
             {chapters.map((c) => (
-              <option key={c} value={c}>Chapter {c}</option>
+              <option key={c} value={c}>
+                Chapter {c}
+              </option>
             ))}
           </select>
         </div>
       </div>
 
-      {/* Chapter Title */}
       <h2 className="chapter-title">
         {book} {chapter} ({translation})
       </h2>
 
-      {/* Loading state */}
-      {isLoading ? (
-        <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)' }}>
-          Loading passage...
+      {state.status === 'loading' && (
+        <div className="reader-status" role="status" aria-live="polite">
+          Loading passage…
         </div>
-      ) : (
-        /* Verses List with Word Highlighting */
+      )}
+
+      {state.status === 'error' && (
+        <div className="reader-status reader-status--error" role="alert">
+          <AlertCircle size={20} aria-hidden="true" />
+          <p>{state.message}</p>
+          {state.retryable && (
+            <button className="btn btn-secondary" onClick={() => setReloadToken((n) => n + 1)}>
+              <RefreshCw size={14} aria-hidden="true" />
+              <span>Try again</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {state.status === 'loaded' && (
         <div className="verses-list">
           {verses.map((verse, idx) => (
             <HighlightedVerse

@@ -1,76 +1,8 @@
-import { TranslationCode, Verse } from './types';
+import booksCatalog from '../../data/books.json';
+import { BookData, BookEntry, ChapterResult, TranslationCode, Verse } from './types';
+import { readCachedBook, writeCachedBook } from './bibleCache';
 
-// Complete list of 66 books in the Bible with chapter counts
-export const BIBLE_BOOKS: { name: string; chapters: number; category: 'OT' | 'NT' }[] = [
-  // Old Testament
-  { name: 'Genesis', chapters: 50, category: 'OT' },
-  { name: 'Exodus', chapters: 40, category: 'OT' },
-  { name: 'Leviticus', chapters: 27, category: 'OT' },
-  { name: 'Numbers', chapters: 36, category: 'OT' },
-  { name: 'Deuteronomy', chapters: 34, category: 'OT' },
-  { name: 'Joshua', chapters: 24, category: 'OT' },
-  { name: 'Judges', chapters: 21, category: 'OT' },
-  { name: 'Ruth', chapters: 4, category: 'OT' },
-  { name: '1 Samuel', chapters: 31, category: 'OT' },
-  { name: '2 Samuel', chapters: 24, category: 'OT' },
-  { name: '1 Kings', chapters: 22, category: 'OT' },
-  { name: '2 Kings', chapters: 25, category: 'OT' },
-  { name: '1 Chronicles', chapters: 29, category: 'OT' },
-  { name: '2 Chronicles', chapters: 36, category: 'OT' },
-  { name: 'Ezra', chapters: 10, category: 'OT' },
-  { name: 'Nehemiah', chapters: 13, category: 'OT' },
-  { name: 'Esther', chapters: 10, category: 'OT' },
-  { name: 'Job', chapters: 42, category: 'OT' },
-  { name: 'Psalms', chapters: 150, category: 'OT' },
-  { name: 'Proverbs', chapters: 31, category: 'OT' },
-  { name: 'Ecclesiastes', chapters: 12, category: 'OT' },
-  { name: 'Song of Solomon', chapters: 8, category: 'OT' },
-  { name: 'Isaiah', chapters: 66, category: 'OT' },
-  { name: 'Jeremiah', chapters: 52, category: 'OT' },
-  { name: 'Lamentations', chapters: 5, category: 'OT' },
-  { name: 'Ezekiel', chapters: 48, category: 'OT' },
-  { name: 'Daniel', chapters: 12, category: 'OT' },
-  { name: 'Hosea', chapters: 14, category: 'OT' },
-  { name: 'Joel', chapters: 3, category: 'OT' },
-  { name: 'Amos', chapters: 9, category: 'OT' },
-  { name: 'Obadiah', chapters: 1, category: 'OT' },
-  { name: 'Jonah', chapters: 4, category: 'OT' },
-  { name: 'Micah', chapters: 7, category: 'OT' },
-  { name: 'Nahum', chapters: 3, category: 'OT' },
-  { name: 'Habakkuk', chapters: 3, category: 'OT' },
-  { name: 'Zephaniah', chapters: 3, category: 'OT' },
-  { name: 'Haggai', chapters: 2, category: 'OT' },
-  { name: 'Zechariah', chapters: 14, category: 'OT' },
-  { name: 'Malachi', chapters: 4, category: 'OT' },
-  // New Testament
-  { name: 'Matthew', chapters: 28, category: 'NT' },
-  { name: 'Mark', chapters: 16, category: 'NT' },
-  { name: 'Luke', chapters: 24, category: 'NT' },
-  { name: 'John', chapters: 21, category: 'NT' },
-  { name: 'Acts', chapters: 28, category: 'NT' },
-  { name: 'Romans', chapters: 16, category: 'NT' },
-  { name: '1 Corinthians', chapters: 16, category: 'NT' },
-  { name: '2 Corinthians', chapters: 13, category: 'NT' },
-  { name: 'Galatians', chapters: 6, category: 'NT' },
-  { name: 'Ephesians', chapters: 6, category: 'NT' },
-  { name: 'Philippians', chapters: 4, category: 'NT' },
-  { name: 'Colossians', chapters: 4, category: 'NT' },
-  { name: '1 Thessalonians', chapters: 5, category: 'NT' },
-  { name: '2 Thessalonians', chapters: 3, category: 'NT' },
-  { name: '1 Timothy', chapters: 6, category: 'NT' },
-  { name: '2 Timothy', chapters: 4, category: 'NT' },
-  { name: 'Titus', chapters: 3, category: 'NT' },
-  { name: 'Philemon', chapters: 1, category: 'NT' },
-  { name: 'Hebrews', chapters: 13, category: 'NT' },
-  { name: 'James', chapters: 5, category: 'NT' },
-  { name: '1 Peter', chapters: 5, category: 'NT' },
-  { name: '2 Peter', chapters: 3, category: 'NT' },
-  { name: '1 John', chapters: 5, category: 'NT' },
-  { name: '2 John', chapters: 1, category: 'NT' },
-  { name: '3 John', chapters: 1, category: 'NT' },
-  { name: 'Jude', chapters: 1, category: 'NT' },
-  { name: 'Revelation', chapters: 22, category: 'NT' }
-];
+export const BIBLE_BOOKS = booksCatalog as BookEntry[];
 
 export const AVAILABLE_TRANSLATIONS: { code: TranslationCode; name: string }[] = [
   { code: 'KJV', name: 'King James Version' },
@@ -78,80 +10,139 @@ export const AVAILABLE_TRANSLATIONS: { code: TranslationCode; name: string }[] =
   { code: 'ASV', name: 'American Standard Version' }
 ];
 
-// In-memory cache for loaded chapters
-const chapterCache: Record<string, Verse[]> = {};
+/** Session-scoped layer in front of IndexedDB. */
+const memoryCache = new Map<string, BookData>();
+
+/** Matches the on-disk filenames produced by scripts/build-bible-data.mjs. */
+export function slugify(bookName: string): string {
+  return bookName.toLowerCase().replace(/\s+/g, '');
+}
+
+export function getBookEntry(bookName: string): BookEntry | undefined {
+  return BIBLE_BOOKS.find((b) => b.name.toLowerCase() === bookName.toLowerCase());
+}
 
 export function getAvailableBooks(): string[] {
-  return BIBLE_BOOKS.map(b => b.name);
+  return BIBLE_BOOKS.map((b) => b.name);
 }
 
 export function getAvailableChapters(bookName: string): number[] {
-  const book = BIBLE_BOOKS.find(b => b.name.toLowerCase() === bookName.toLowerCase());
+  const book = getBookEntry(bookName);
   if (!book) return [1];
   return Array.from({ length: book.chapters }, (_, i) => i + 1);
 }
 
-/**
- * Asynchronously fetches any chapter across the entire Bible (all 66 books) from open public domain API.
- * Caches in memory and returns all verses (e.g. Genesis 1 returns all 31 verses).
- */
-export async function fetchChapterVersesAsync(book: string, chapter: number, translation: TranslationCode = 'KJV'): Promise<Verse[]> {
-  const cacheKey = `${translation}_${book}_${chapter}`;
-  if (chapterCache[cacheKey]) {
-    return chapterCache[cacheKey];
+/** The chapter after the given reference, crossing into the next book. */
+export function getNextChapter(bookName: string, chapter: number): { book: string; chapter: number } | null {
+  const index = BIBLE_BOOKS.findIndex((b) => b.name.toLowerCase() === bookName.toLowerCase());
+  if (index === -1) return null;
+
+  if (chapter < BIBLE_BOOKS[index].chapters) {
+    return { book: BIBLE_BOOKS[index].name, chapter: chapter + 1 };
   }
-
-  try {
-    const formattedRef = `${encodeURIComponent(book)}+${chapter}`;
-    const url = `https://bible-api.com/${formattedRef}?translation=${translation.toLowerCase()}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const json = await response.json();
-
-    if (json.verses && Array.isArray(json.verses) && json.verses.length > 0) {
-      const verses: Verse[] = json.verses.map((v: any) => ({
-        verse: v.verse,
-        text: v.text.trim().replace(/\s+/g, ' ')
-      }));
-      chapterCache[cacheKey] = verses;
-      return verses;
-    }
-  } catch (err) {
-    console.warn(`[BibleService] Live fetch failed for ${book} ${chapter} (${translation}), trying backup API...`, err);
-  }
-
-  // Backup open CDN fetch if bible-api.com is unreachable
-  try {
-    const bookSlug = book.toLowerCase().replace(/\s+/g, '');
-    const backupUrl = `https://cdn.jsdelivr.net/gh/wldeh/bible-api/bibles/en-kjv/books/${bookSlug}/chapters/${chapter}.json`;
-    const res = await fetch(backupUrl);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.verses && Array.isArray(data.verses)) {
-        const verses: Verse[] = data.verses.map((v: any) => ({
-          verse: parseInt(v.verse || v.id, 10),
-          text: (v.text || '').trim()
-        }));
-        chapterCache[cacheKey] = verses;
-        return verses;
-      }
-    }
-  } catch (e) {
-    console.error(`[BibleService] Backup CDN fetch failed:`, e);
-  }
-
-  return [];
+  const next = BIBLE_BOOKS[index + 1];
+  return next ? { book: next.name, chapter: 1 } : null;
 }
 
-export function splitIntoWords(text: string): { word: string; cleanWord: string }[] {
-  const rawTokens = text.split(/(\s+)/);
-  const words: { word: string; cleanWord: string }[] = [];
-  
-  for (const token of rawTokens) {
-    if (token.trim().length > 0) {
-      const cleanWord = token.replace(/[^\w]/g, '').toLowerCase();
-      words.push({ word: token, cleanWord });
-    }
+async function loadBook(bookName: string, translation: TranslationCode): Promise<BookData | null> {
+  const slug = slugify(bookName);
+  const code = translation.toLowerCase();
+  const key = `${code}:${slug}`;
+
+  const inMemory = memoryCache.get(key);
+  if (inMemory) return inMemory;
+
+  const cached = await readCachedBook(code, slug);
+  if (cached) {
+    memoryCache.set(key, cached);
+    return cached;
   }
-  return words;
+
+  // Bundled asset — same origin, no API, no key. The service worker caches
+  // this on read (U10), which is what makes the offline promise real.
+  const response = await fetch(`${import.meta.env.BASE_URL}bibles/${code}/${slug}.json`);
+  if (!response.ok) return null;
+
+  const book = (await response.json()) as BookData;
+  memoryCache.set(key, book);
+  void writeCachedBook(code, slug, book);
+  return book;
+}
+
+/**
+ * Loads one chapter. Failure is reported in the return value rather than as an
+ * empty array, so the UI can tell "this reference does not exist" apart from
+ * "we could not reach the data".
+ */
+export async function loadChapter(
+  bookName: string,
+  chapter: number,
+  translation: TranslationCode = 'KJV'
+): Promise<ChapterResult> {
+  const entry = getBookEntry(bookName);
+  if (!entry) {
+    return { ok: false, reason: 'not-found', message: `Unknown book: ${bookName}` };
+  }
+  if (!Number.isInteger(chapter) || chapter < 1 || chapter > entry.chapters) {
+    return {
+      ok: false,
+      reason: 'not-found',
+      message: `${entry.name} has ${entry.chapters} chapter${entry.chapters === 1 ? '' : 's'}.`
+    };
+  }
+
+  let book: BookData | null;
+  try {
+    book = await loadBook(entry.name, translation);
+  } catch {
+    book = null;
+  }
+
+  if (!book) {
+    return {
+      ok: false,
+      reason: 'unavailable',
+      message: `Could not load ${entry.name} (${translation}). It may not be downloaded yet.`
+    };
+  }
+
+  const verses = book.chapters?.[String(chapter)];
+  if (!Array.isArray(verses) || verses.length === 0) {
+    return {
+      ok: false,
+      reason: 'unavailable',
+      message: `${entry.name} ${chapter} (${translation}) is missing from the downloaded text.`
+    };
+  }
+
+  return { ok: true, verses };
+}
+
+/** Word tokens for highlighting. Whitespace is dropped; order is preserved. */
+export function splitIntoWords(text: string): { word: string; cleanWord: string }[] {
+  return text
+    .split(/(\s+)/)
+    .filter((token) => token.trim().length > 0)
+    .map((token) => ({ word: token, cleanWord: token.replace(/[^\w]/g, '').toLowerCase() }));
+}
+
+/** Word count used to align highlight indices across verses. */
+export function countWords(text: string): number {
+  const trimmed = text.trim();
+  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
+}
+
+/** Cumulative word offset of each verse within a chapter. */
+export function computeVerseOffsets(verses: Verse[]): number[] {
+  let running = 0;
+  return verses.map((v) => {
+    const offset = running;
+    running += countWords(v.text);
+    return offset;
+  });
+}
+
+/** Test seam. */
+export function clearMemoryCache(): void {
+  memoryCache.clear();
 }
