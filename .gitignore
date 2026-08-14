@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Generated model assets (~138 MB, produced by scripts/build-model-assets.mjs)
+# Bible text under public/bibles/ IS committed — see KTD2 in the V1 plan.
+public/models/
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+.playwright/
+
+# Harness worktrees
+.claude/worktrees/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python (backend removed in V1 — guard against strays)
+__pycache__/
+*.py[cod]
+.venv/
+venv/

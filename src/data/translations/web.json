@@ -1,0 +1,39 @@
+{
+  "translation": "WEB",
+  "name": "World English Bible",
+  "books": {
+    "Genesis": {
+      "chapters": {
+        "1": [
+          {"verse": 1, "text": "In the beginning, God created the heavens and the earth."},
+          {"verse": 2, "text": "The earth was formless and empty. Darkness was on the surface of the deep and God's Spirit was hovering over the surface of the waters."},
+          {"verse": 3, "text": "God said, 'Let there be light,' and there was light."},
+          {"verse": 4, "text": "God saw the light, and saw that it was good. God divided the light from the darkness."},
+          {"verse": 5, "text": "God called the light 'day', and the darkness he called 'night'. There was evening and there was morning, the first day."}
+        ]
+      }
+    },
+    "Psalms": {
+      "chapters": {
+        "23": [
+          {"verse": 1, "text": "Yahweh is my shepherd: I shall not lack."},
+          {"verse": 2, "text": "He makes me lie down in green pastures. He leads me beside still waters."},
+          {"verse": 3, "text": "He restores my soul. He guides me in the paths of righteousness for his name's sake."},
+          {"verse": 4, "text": "Even though I walk through the valley of the shadow of death, I will fear no evil, for you are with me. Your rod and your staff, they comfort me."},
+          {"verse": 5, "text": "You prepare a table before me in the presence of my enemies. You anoint my head with oil. My cup runs over."},
+          {"verse": 6, "text": "Surely goodness and loving kindness shall follow me all the days of my life, and I will dwell in Yahweh's house forever."}
+        ]
+      }
+    },
+    "John": {
+      "chapters": {
+        "3": [
+          {"verse": 14, "text": "As Moses lifted up the serpent in the wilderness, even so must the Son of Man be lifted up,"},
+          {"verse": 15, "text": "that whoever believes in him may have eternal life."},
+          {"verse": 16, "text": "For God so loved the world, that he gave his one and only Son, that whoever believes in him should not perish, but have eternal life."},
+          {"verse": 17, "text": "For God didn't send his Son into the world to judge the world, but that the world should be saved through him."}
+        ]
+      }
+    }
+  }
+}

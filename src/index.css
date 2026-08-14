@@ -1,0 +1,397 @@
+:root {
+  --bg-primary: #0a0d14;
+  --bg-card: rgba(22, 27, 38, 0.75);
+  --bg-card-hover: rgba(30, 38, 54, 0.85);
+  --accent-gold: #f59e0b;
+  --accent-gold-glow: rgba(245, 158, 11, 0.4);
+  --accent-gold-light: #fbbf24;
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --shadow-card: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  --font-serif: 'Cinzel', serif;
+  --font-sans: 'Outfit', 'Inter', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  line-height: 1.6;
+}
+
+/* App Shell Layout */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.05), transparent 70%),
+              radial-gradient(circle at 100% 100%, rgba(59, 130, 246, 0.03), transparent 50%);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 2rem;
+  border-bottom: 1px solid var(--border-color);
+  backdrop-filter: blur(16px);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(10, 13, 20, 0.8);
+}
+
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-family: var(--font-serif);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--accent-gold);
+  letter-spacing: 0.5px;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* Selector Badges & Buttons */
+.select-badge {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.select-badge:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--accent-gold);
+}
+
+.btn {
+  border: none;
+  padding: 0.55rem 1.1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-gold), #d97706);
+  color: #0d1117;
+  box-shadow: 0 4px 15px var(--accent-gold-glow);
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(245, 158, 11, 0.5);
+}
+
+.btn-secondary {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--text-secondary);
+}
+
+/* Bible Reader Area */
+.reader-container {
+  max-width: 860px;
+  width: 100%;
+  margin: 2rem auto 8rem auto;
+  padding: 0 1.5rem;
+}
+
+.nav-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  background: var(--bg-card);
+  padding: 0.75rem 1.25rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color);
+}
+
+.navigation-selectors {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.select-input {
+  background: rgba(10, 13, 20, 0.6);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.45rem 0.85rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+}
+
+.chapter-title {
+  font-family: var(--font-serif);
+  font-size: 2.25rem;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 2rem;
+  color: var(--accent-gold);
+  letter-spacing: 1px;
+}
+
+.verses-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  font-size: 1.15rem;
+  line-height: 1.9;
+}
+
+.verse-item {
+  position: relative;
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.verse-item:hover {
+  background: rgba(245, 158, 11, 0.06);
+  border-left: 3px solid var(--accent-gold);
+}
+
+.verse-number {
+  font-family: var(--font-serif);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent-gold);
+  margin-right: 0.5rem;
+  vertical-align: super;
+  user-select: none;
+}
+
+/* High-Visibility Luminous Karaoke Word Highlighting */
+.word-span {
+  transition: all 0.1s ease;
+  border-radius: 4px;
+  padding: 2px 3px;
+}
+
+.word-span.highlighted {
+  background: #f59e0b !important;
+  color: #090d16 !important;
+  font-weight: 800 !important;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.8), 0 0 2px #ffffff;
+  transform: scale(1.06);
+  display: inline-block;
+}
+
+/* Floating Audio Player Bar */
+.player-bar {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 3rem);
+  max-width: 780px;
+  background: rgba(16, 21, 31, 0.92);
+  border: 1px solid var(--accent-gold-glow);
+  backdrop-filter: blur(20px);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.75rem;
+  box-shadow: var(--shadow-card), 0 0 30px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+}
+
+.player-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.player-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.player-passage {
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.player-voice-tag {
+  font-size: 0.75rem;
+  color: var(--accent-gold);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+}
+
+.player-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.btn-play-pause {
+  background: linear-gradient(135deg, var(--accent-gold), #d97706);
+  border: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  color: #0d1117;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 20px var(--accent-gold-glow);
+  transition: all 0.2s ease;
+}
+
+.btn-play-pause:hover {
+  transform: scale(1.05);
+  box-shadow: 0 6px 25px rgba(245, 158, 11, 0.6);
+}
+
+/* Modals */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 1.5rem;
+}
+
+.modal-content {
+  background: #121722;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  max-width: 540px;
+  width: 100%;
+  padding: 1.75rem;
+  box-shadow: var(--shadow-card);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+.modal-title {
+  font-family: var(--font-serif);
+  font-size: 1.25rem;
+  color: var(--accent-gold);
+}
+
+.voice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+.voice-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 0.85rem;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.voice-card:hover {
+  border-color: var(--accent-gold);
+  background: var(--bg-card-hover);
+}
+
+.voice-card.selected {
+  border-color: var(--accent-gold);
+  background: rgba(245, 158, 11, 0.1);
+  box-shadow: 0 0 10px var(--accent-gold-glow);
+}
+
+.voice-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.voice-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+  display: block;
+}
+
+.badge-tag {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-free {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.badge-cloned {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.uploader-box {
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1.75rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(10, 13, 20, 0.4);
+}
+
+.uploader-box:hover {
+  border-color: var(--accent-gold);
+  background: rgba(245, 158, 11, 0.05);
+}
