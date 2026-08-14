@@ -89,7 +89,7 @@ class FakeSource {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 /** Waits for the controller to settle; the fast audio clock does the rest. */
-async function settle(ms = 400): Promise<void> {
+async function settle(ms = 900): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
@@ -187,12 +187,14 @@ describe('sentence sequencing', () => {
     expect(texts).toEqual(['First one.', 'Second one.', 'Third one.']);
     expect(seen).toEqual([0, 1, 2]);
 
-    // The point of scheduling against the audio clock: each sentence begins
-    // exactly where the previous one ended, with no gap to hear.
+    // Scheduling against the audio clock: each sentence begins a fixed,
+    // deliberate pause after the previous one ends — never a gap that varies
+    // with how long synthesis happened to take.
     const starts = context.startTimes;
+    const GAP = 0.22;
     expect(starts).toHaveLength(3);
     for (let i = 1; i < starts.length; i += 1) {
-      expect(starts[i] - starts[i - 1]).toBeCloseTo(0.1, 5);
+      expect(starts[i] - starts[i - 1]).toBeCloseTo(0.1 + GAP, 5);
     }
   });
 

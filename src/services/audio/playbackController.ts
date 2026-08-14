@@ -69,6 +69,17 @@ export class PlaybackController {
   private nextStartAt = 0;
   private scheduled: { chunk: Chunk; startAt: number; endAt: number; source: AudioBufferSourceNode }[] = [];
 
+  /**
+   * Pause inserted between sentences.
+   *
+   * Utterances arrive trimmed to their speech, so spacing is set here rather
+   * than inherited from whatever silence the model padded with — which varied
+   * from 0.9s to 1.2s between sentences and read as sluggish. The reference
+   * pipeline uses 0.3s between chunks; slightly less suits continuous reading,
+   * where every sentence boundary would otherwise feel like a paragraph break.
+   */
+  private static readonly SENTENCE_GAP = 0.22;
+
   getState(): PlaybackState {
     return this.state;
   }
@@ -260,7 +271,7 @@ export class PlaybackController {
 
     const endAt = startAt + chunk.buffer.duration;
     this.scheduled.push({ chunk, startAt, endAt, source });
-    this.nextStartAt = endAt;
+    this.nextStartAt = endAt + PlaybackController.SENTENCE_GAP;
 
     if (generation === this.generation) {
       this.setState('playing');

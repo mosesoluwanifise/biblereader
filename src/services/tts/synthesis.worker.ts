@@ -232,15 +232,51 @@ async function synthesize(
   const vocoded = await sessions.get('vocoder')!.run({ latent });
   const source = vocoded.wav_tts.data as Float32Array;
 
-  // Trim the grid padding. Leaving it in makes every utterance up to a chunk
-  // longer than predicted, which reads as unnatural drag at the end of each
-  // sentence and pushes word timings out of step with the audio.
-  const length = Math.min(source.length, targetSamples);
+  /**
+   * Locate the speech inside the utterance.
+   *
+   * The model pads generously: measured across three sentences, speech
+   * occupied only ~72% of the buffer, with 0.40-0.57s of leading and
+   * 0.53-0.65s of trailing silence. Two things went wrong as a result. Word
+   * timings are interpolated across the returned duration, so the highlight
+   * began moving half a second before any sound and resolved half a second
+   * after the voice stopped — out of step on every sentence. And back-to-back
+   * scheduling left about 1.1s of dead air between sentences.
+   *
+   * Trimming to the speech plus a short pad fixes the alignment at its source
+   * and lets playback set sentence spacing deliberately.
+   */
+  function findSpeechBounds(buf: Float32Array, limit: number): [number, number] {
+    let peak = 0;
+    for (let i = 0; i < limit; i += 1) {
+      const v = Math.abs(buf[i]);
+      if (v > peak) peak = v;
+    }
+    // Relative to peak so a quiet voice is not mistaken for silence, with an
+    // absolute floor so near-silent output cannot select the whole buffer.
+    const threshold = Math.max(0.004, peak * 0.02);
+
+    let start = 0;
+    while (start < limit && Math.abs(buf[start]) <= threshold) start += 1;
+    let end = limit;
+    while (end > start && Math.abs(buf[end - 1]) <= threshold) end -= 1;
+    if (start >= end) return [0, limit];
+
+    // Keep a little room so onsets and decays are not clipped.
+    const padStart = Math.round(0.05 * SAMPLE_RATE);
+    const padEnd = Math.round(0.08 * SAMPLE_RATE);
+    return [Math.max(0, start - padStart), Math.min(limit, end + padEnd)];
+  }
+
+  // Drop the latent-grid padding first, then the model's own leading and
+  // trailing silence.
+  const gridLimit = Math.min(source.length, targetSamples);
+  const [from, to] = findSpeechBounds(source, gridLimit);
 
   // Copy into a plain buffer so it can be transferred; ONNX output may sit in
   // shared WASM memory, which is not transferable.
-  const samples = new Float32Array(length);
-  samples.set(source.subarray(0, length));
+  const samples = new Float32Array(to - from);
+  samples.set(source.subarray(from, to));
 
   post({ id, type: 'audio', audio: samples.buffer, sampleRate: SAMPLE_RATE, predicted }, [samples.buffer]);
 }

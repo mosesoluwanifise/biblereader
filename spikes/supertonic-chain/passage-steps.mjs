@@ -95,22 +95,33 @@ for (const sentence of sentences) {
     latent = out.denoised_latent;
   }
   const { wav_tts } = await voc.run({ latent });
-  const audio = wav_tts.data.subarray(0, Math.min(wav_tts.data.length, target));
+  const full = wav_tts.data;
+  const limit = Math.min(full.length, target);
+  let peak = 0;
+  for (let i = 0; i < limit; i++) peak = Math.max(peak, Math.abs(full[i]));
+  const thr = Math.max(0.004, peak * 0.02);
+  let a = 0; while (a < limit && Math.abs(full[a]) <= thr) a++;
+  let b = limit; while (b > a && Math.abs(full[b - 1]) <= thr) b--;
+  const from = Math.max(0, a - Math.round(0.05 * SR));
+  const to = Math.min(limit, b + Math.round(0.08 * SR));
+  const audio = full.subarray(from, to);
+  console.log(`      trimmed ${(limit/SR).toFixed(2)}s -> ${(audio.length/SR).toFixed(2)}s (lead ${(a/SR).toFixed(2)}s, trail ${((limit-b)/SR).toFixed(2)}s removed)`);
   chunks.push(audio);
 
-  let peak = 0, sq = 0;
-  for (let i = 0; i < audio.length; i += 1) { const v = Math.abs(audio[i]); if (v > peak) peak = v; sq += audio[i] * audio[i]; }
+  let outPeak = 0, sq = 0;
+  for (let i = 0; i < audio.length; i += 1) { const v = Math.abs(audio[i]); if (v > outPeak) outPeak = v; sq += audio[i] * audio[i]; }
   console.log(
     `  "${sentence.slice(0, 40)}..."  ${(audio.length / SR).toFixed(2)}s  ` +
-      `peak ${peak.toFixed(3)}  rms ${Math.sqrt(sq / audio.length).toFixed(4)}  ` +
+      `peak ${outPeak.toFixed(3)}  rms ${Math.sqrt(sq / audio.length).toFixed(4)}  ` +
       `${((Date.now() - t0) / 1000).toFixed(1)}s wall`
   );
 }
 
-const total = chunks.reduce((n, c) => n + c.length, 0);
+const GAP = Math.round(0.22 * SR);
+const total = chunks.reduce((n, c) => n + c.length, 0) + GAP * (chunks.length - 1);
 const joined = new Float32Array(total);
 let at = 0;
-for (const c of chunks) { joined.set(c, at); at += c.length; }
+chunks.forEach((c, i) => { joined.set(c, at); at += c.length + (i < chunks.length - 1 ? GAP : 0); });
 
 const elapsed = (Date.now() - wall0) / 1000;
 console.log(`\n  passage ${(total / SR).toFixed(2)}s in ${elapsed.toFixed(1)}s = ${(total / SR / elapsed).toFixed(2)}x realtime`);
@@ -124,6 +135,6 @@ h.write('RIFF', 0); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVE', 8); h.w
 h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(SR, 24);
 h.writeUInt32LE(SR * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36);
 h.writeUInt32LE(pcm.length, 40);
-const out = join(HERE, `passage-${String(STEPS).padStart(2, '0')}step.wav`);
+const out = join(HERE, `passage-tight-${String(STEPS).padStart(2, '0')}step.wav`);
 await writeFile(out, Buffer.concat([h, pcm]));
 console.log(`  wrote ${out.split(/[\\/]/).pop()}`);
