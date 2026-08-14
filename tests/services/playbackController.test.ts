@@ -1,0 +1,247 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { PlaybackController } from '../../src/services/audio/playbackController';
+import { supertonicEngine } from '../../src/services/tts/supertonicEngine';
+import { interpolateWordTimings } from '../../src/services/tts/wordTiming';
+
+/**
+ * These cover regressions of behavior that actually shipped broken:
+ * auto-advance replaying the previous chapter, pause discarding position, and
+ * play losing the user gesture behind an await.
+ */
+
+/** Minimal AudioContext double. Sources finish when we say they do. */
+class FakeAudioContext {
+  currentTime = 0;
+  state: 'running' | 'suspended' | 'closed' = 'running';
+  destination = {};
+  static live: FakeAudioContext[] = [];
+  sources: FakeSource[] = [];
+
+  constructor() {
+    FakeAudioContext.live.push(this);
+  }
+
+  createBuffer(_channels: number, length: number, sampleRate: number) {
+    return { length, sampleRate, copyToChannel: vi.fn() };
+  }
+
+  createBufferSource() {
+    const source = new FakeSource(this);
+    this.sources.push(source);
+    return source;
+  }
+
+  async suspend() {
+    this.state = 'suspended';
+  }
+
+  async resume() {
+    this.state = 'running';
+  }
+
+  /** Ends the most recently started source, as playback reaching its end would. */
+  finishCurrent() {
+    const source = this.sources.find((s) => s.started && !s.ended);
+    source?.finish();
+  }
+}
+
+class FakeSource {
+  buffer: unknown = null;
+  onended: (() => void) | null = null;
+  started = false;
+  ended = false;
+  constructor(private context: FakeAudioContext) {}
+  connect() {}
+  start() {
+    this.started = true;
+  }
+  stop() {
+    this.ended = true;
+  }
+  finish() {
+    this.ended = true;
+    this.onended?.();
+  }
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+async function drain(context: FakeAudioContext, times: number): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await flush();
+    context.finishCurrent();
+    await flush();
+  }
+}
+
+beforeEach(() => {
+  FakeAudioContext.live = [];
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(0), 1000) as unknown as number);
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
+
+  vi.spyOn(supertonicEngine, 'isReady').mockReturnValue(true);
+  vi.spyOn(supertonicEngine, 'load').mockResolvedValue(undefined);
+  vi.spyOn(supertonicEngine, 'synthesizeSentence').mockImplementation(async (text: string) => ({
+    audio: new Float32Array(4410),
+    sampleRate: 44100,
+    duration: 1,
+    words: interpolateWordTimings(text, 1)
+  }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('start', () => {
+  it('creates and resumes the audio context synchronously, before any await', () => {
+    // The shipped bug: play awaited a chapter fetch before speaking, which
+    // severs the iOS user-gesture chain. The context must exist by the time
+    // start() returns, not after a microtask.
+    const controller = new PlaybackController();
+    controller.start('In the beginning God created.', 'F1');
+
+    expect(FakeAudioContext.live).toHaveLength(1);
+    expect(FakeAudioContext.live[0].state).toBe('running');
+  });
+
+  it('reports preparing immediately and playing once audio starts', async () => {
+    const states: string[] = [];
+    const controller = new PlaybackController();
+    controller.start('Jesus wept.', 'F1', { onStateChange: (s) => states.push(s) });
+
+    expect(states).toContain('preparing');
+    await flush();
+    await flush();
+    expect(states).toContain('playing');
+  });
+});
+
+describe('pause and resume', () => {
+  it('resumes rather than restarting, keeping the same source', async () => {
+    // The shipped bug: pause called cancel(), so resume replayed the chapter.
+    const controller = new PlaybackController();
+    controller.start('Jesus wept.', 'F1');
+    await flush();
+    await flush();
+
+    const context = FakeAudioContext.live[0];
+    const sourcesBefore = context.sources.length;
+
+    await controller.pause();
+    expect(controller.getState()).toBe('paused');
+    expect(context.state).toBe('suspended');
+
+    await controller.resume();
+    expect(controller.getState()).toBe('playing');
+    expect(context.state).toBe('running');
+    // No new source: playback continued rather than starting over.
+    expect(context.sources).toHaveLength(sourcesBefore);
+  });
+
+  it('ignores pause when not playing and resume when not paused', async () => {
+    const controller = new PlaybackController();
+    await controller.pause();
+    expect(controller.getState()).toBe('idle');
+    await controller.resume();
+    expect(controller.getState()).toBe('idle');
+  });
+});
+
+describe('sentence sequencing', () => {
+  it('synthesizes each sentence and plays them in order', async () => {
+    const controller = new PlaybackController();
+    const seen: number[] = [];
+    controller.start('First one. Second one. Third one.', 'F1', {
+      onSentence: (index) => seen.push(index)
+    });
+
+    await flush();
+    const context = FakeAudioContext.live[0];
+    await drain(context, 3);
+
+    expect(supertonicEngine.synthesizeSentence).toHaveBeenCalledTimes(3);
+    const texts = (supertonicEngine.synthesizeSentence as unknown as { mock: { calls: string[][] } }).mock.calls.map(
+      (c) => c[0]
+    );
+    expect(texts).toEqual(['First one.', 'Second one.', 'Third one.']);
+    expect(seen).toEqual([0, 1, 2]);
+  });
+
+  it('calls onEnd once the passage finishes', async () => {
+    const onEnd = vi.fn();
+    const controller = new PlaybackController();
+    controller.start('One. Two.', 'F1', { onEnd });
+
+    await flush();
+    await drain(FakeAudioContext.live[0], 2);
+
+    expect(onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it('offsets word indices by the starting verse', async () => {
+    const words: number[] = [];
+    const controller = new PlaybackController();
+    // Starting part-way into a chapter must not highlight from index 0.
+    controller.start('Alpha beta gamma.', 'F1', { onWord: (i) => words.push(i) }, 100);
+
+    await flush();
+    await flush();
+    await new Promise((r) => setTimeout(r, 1100));
+
+    expect(words.every((w) => w >= 100)).toBe(true);
+  });
+});
+
+describe('stop', () => {
+  it('abandons in-flight playback and resets to idle', async () => {
+    const onEnd = vi.fn();
+    const controller = new PlaybackController();
+    controller.start('One. Two. Three.', 'F1', { onEnd });
+    await flush();
+
+    controller.stop();
+    expect(controller.getState()).toBe('idle');
+
+    // Finishing the abandoned source must not advance the stopped run.
+    FakeAudioContext.live[0].finishCurrent();
+    await flush();
+    await flush();
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  it('does not resume a superseded run when start is called again', async () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const controller = new PlaybackController();
+
+    controller.start('One. Two.', 'F1', { onSentence: first });
+    await flush();
+    controller.start('Alpha. Beta.', 'F1', { onSentence: second });
+    await flush();
+    await drain(FakeAudioContext.live[0], 2);
+
+    expect(second).toHaveBeenCalled();
+  });
+});
+
+describe('error handling', () => {
+  it('surfaces synthesis failure instead of hanging in preparing', async () => {
+    (supertonicEngine.synthesizeSentence as unknown as { mockRejectedValue: (e: Error) => void }).mockRejectedValue(
+      new Error('model unavailable')
+    );
+    const onError = vi.fn();
+    const controller = new PlaybackController();
+    controller.start('Jesus wept.', 'F1', { onError });
+
+    await flush();
+    await flush();
+    await flush();
+
+    expect(onError).toHaveBeenCalledWith('model unavailable');
+    expect(controller.getState()).toBe('idle');
+  });
+});
