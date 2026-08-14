@@ -1,47 +1,81 @@
-# Scripture Voice — Full 66-Book Bible Text Aggregation & Architecture Walkthrough
+# Scripture Voice — Architecture Walkthrough
 
-## 1. Bible Text Aggregation Strategy
+This document describes what the application actually does today. Anything not
+yet built is marked as such. The V1 target is defined in
+`docs/plans/2026-08-14-001-feat-scripture-voice-v1-plan.md`.
 
-To provide a complete, production-ready Bible reading experience across all **66 Old and New Testament books** (1,189 chapters, ~31,000 verses) without bloating the initial PWA download size, the application uses a **hybrid dual-layer aggregation strategy**:
+## Build status
 
-```mermaid
-flowchart TD
-    User[User selects Book / Chapter / Translation] --> CacheCheck{In-Memory / IndexedDB Cache?}
-    CacheCheck -->|Yes - Hit| Render[Instant Render & Playback]
-    CacheCheck -->|No - Miss| CheckBundled{Bundled Sample Passage?}
-    CheckBundled -->|Yes| LoadBundled[Load Bundled JSON]
-    CheckBundled -->|No| FetchAPI[Fetch Chapter via Open Public Domain API]
-    FetchAPI --> StoreCache[Save to IndexedDB / CacheStorage]
-    StoreCache --> Render
-    LoadBundled --> Render
-```
+| Area | State |
+| --- | --- |
+| Bible text catalog (66 books, chapter bounds) | Built |
+| Test harness (Vitest + Playwright) | Built |
+| Bundled Bible text (KJV / WEB / ASV) | Not built — U2 |
+| Local-first text service with offline cache | Not built — U3 |
+| Voice cloning removal | Not built — U4 |
+| Supertonic ONNX synthesis | Not built — U5, U6, U11 |
+| Word-level timing | Not built — U7 |
+| Playback controller (pause/resume, auto-advance) | Broken — U8 |
+| Reading position, auto-scroll | Not built — U9 |
+| PWA install, offline caching, MediaSession | Broken — U10 |
 
-### Key Components
+## Known defects at the baseline commit
 
-1. **Complete 66-Book Catalog (`src/services/bible/bibleService.ts`):**
-   - Contains exact chapter bounds for all 39 Old Testament books (Genesis–Malachi) and 27 New Testament books (Matthew–Revelation).
-   - Categorized by Testament for clear drop-down navigation.
+These are real and reproducible on `main` as imported. They are the reason V1
+is a rebuild rather than an increment.
 
-2. **On-Demand Fetching (`fetchChapterVersesAsync`):**
-   - Leverages high-availability open public domain Bible endpoints (e.g., `bible-api.com` / `wldeh/bible-api`) for KJV, WEB, and ASV translations.
-   - Requires **no API keys** and has zero copyright restrictions.
+- `SupertonicEngine` is `window.speechSynthesis` with pitch and rate offsets.
+  It performs no ONNX inference; `onnxruntime-web` is a dependency with no
+  imports. The ten "preset voices" collapse onto whatever one to three voices
+  the host OS provides.
+- Voice cloning processes no audio. The backend assigns a UUID and stores a
+  dict; cloned voices fall through to the default system voice at playback.
+- Chapter text is fetched live from `bible-api.com` on every cache miss. The
+  fallback path parses `data.verses` from a source that returns `data`, so it
+  has never succeeded.
+- Auto-advance calls `setChapter` and then invokes a `handleTogglePlay`
+  captured from the previous render. It re-reads the prior chapter
+  indefinitely while the UI displays the next one.
+- Pause calls `speechSynthesis.cancel()`, which discards position. Resuming
+  restarts the chapter.
+- The play path awaits a network fetch before speaking, which severs the iOS
+  user-gesture chain, so playback never starts on iOS Safari.
+- The manifest references icons that do not exist in any directory, so the
+  browser install gate fails and the app is not installable.
+- The service worker precaches five build assets. No Bible text or model asset
+  is cached, so there is no offline support.
 
-3. **Offline PWA Caching:**
-   - As chapters are fetched, they are automatically stored in browser memory and IndexedDB.
-   - The Vite PWA Service Worker (`sw.js`) caches loaded chapters so subsequent reads work completely offline.
+## Bible text
 
----
+`src/services/bible/bibleService.ts` holds the complete 66-book catalog with
+per-book chapter counts, split by testament for navigation. That catalog is
+correct and is the validation oracle for the U2 ingest pipeline.
 
-## 2. Text Aggregation Build Script (Optional Pre-Bundling)
+Text delivery is being moved from live API calls to bundled per-book JSON
+under `public/bibles/{translation}/{book}.json`, generated once by
+`scripts/build-bible-data.mjs` from `wldeh/bible-api` and committed to the
+repository. See KTD1 and KTD2 in the V1 plan for why that source and that
+packaging.
 
-For offline-first enterprise deployments where all 1,189 chapters must be pre-bundled into the application repository:
-- Run `node scripts/download-bibles.js` to pre-download all 66 books in JSON format into `public/bibles/{translation}/{book}.json`.
+## Testing
 
----
+Two tiers, because one does not cover this application:
 
-## 3. Verification & Validation
+- **Vitest** (`vitest.config.ts`, jsdom) for pure logic — text normalization,
+  caching, timing math, reducers.
+- **Playwright** (`playwright.config.ts`) for anything needing a real browser:
+  audio output, WebGPU versus WASM execution-provider selection, service
+  worker behavior, and the PWA install gate. `onnxruntime-web` does not run
+  meaningfully under jsdom.
 
-- ✅ **Build Verification:** `npm run build` executed cleanly (TypeScript compilation + Vite PWA bundle generation).
-- ✅ **Navigation Test:** Verified drop-down selection for Old Testament (Genesis 1, Psalms 23) and New Testament (John 3, Romans 8, Revelation 22) across KJV, WEB, and ASV.
-- ✅ **Position Preservation (R11):** Verified that switching translation maintains the active book and chapter index.
-- ✅ **Audio Word Highlighting (R2):** Verified word-by-word karaoke highlighting stays in sync during chapter playback.
+## Model licensing
+
+Supertonic weights are distributed under BigScience Open RAIL-M. Commercial
+use is permitted, but shipping weights to the browser is Distribution under
+that license and carries conditions: the license text must travel with the
+weights, quantization requires a change notice, the Attachment A use
+restrictions must bind end users through the application's terms, and
+synthesized audio must be disclosed as machine-generated. U5 covers this.
+
+The inference code is separate and unencumbered — the `supertonic` npm package
+is MIT, and Section 4(a) exempts Complementary Material from pass-through.
