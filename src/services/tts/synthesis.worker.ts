@@ -118,8 +118,20 @@ async function load(id: number, base: string): Promise<void> {
   indexer = await fetch(`${modelBase}/onnx/unicode_indexer.json`).then((r) => r.json());
   step('tokenizer');
 
-  // R13: WebGPU where available, WASM otherwise.
-  const providers: ('webgpu' | 'wasm')[] = 'gpu' in navigator ? ['webgpu', 'wasm'] : ['wasm'];
+  /**
+   * WASM first, WebGPU as fallback — the reverse of what R13 assumed.
+   *
+   * Measured in this worker on the full Genesis 1:1-3 passage at 8 steps:
+   * WASM 1.34x realtime, WebGPU 1.09x. Both clear playback, but WASM wins.
+   * These graphs are small and the flow loop runs 8 sequential passes, so
+   * per-call GPU transfer overhead outweighs the parallelism, and any op
+   * lacking a WebGPU kernel falls back to CPU mid-graph anyway.
+   *
+   * WebGPU is retained rather than dropped: this is one machine's integrated
+   * GPU, and a discrete card could plausibly reverse it. Ordering is the only
+   * thing that changed.
+   */
+  const providers: ('wasm' | 'webgpu')[] = 'gpu' in navigator ? ['wasm', 'webgpu'] : ['wasm'];
 
   for (const graph of GRAPHS) {
     const url = `${modelBase}/onnx/${graph}.onnx`;
