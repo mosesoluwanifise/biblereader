@@ -46,7 +46,7 @@ npm run dev
 | `npm run test:watch` | Vitest in watch mode |
 | `npm run test:e2e` | Playwright browser tier |
 | `npm run build:bible` | Generate `public/bibles/` from the upstream text source |
-| `npm run build:models` | Download, quantize, and license the Supertonic model bundle |
+| `npm run build:models` | Download and license the Supertonic model bundle (fp32; `--quantize` for int8) |
 
 Playwright needs its browsers once before `test:e2e`:
 
@@ -77,7 +77,7 @@ servers set them via `vite.config.ts`; static hosts need their own config.
 - `src/services/audio/` — playback controller and highlight clock
 - `scripts/` — build-time data and model pipelines
 - `public/bibles/` — generated per-book text, committed
-- `public/models/` — generated model bundle, not committed (~138 MB)
+- `public/models/` — generated model bundle, not committed (~383 MB fp32)
 
 ## Licensing
 
