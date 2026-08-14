@@ -1,6 +1,6 @@
 import booksCatalog from '../../data/books.json';
 import { BookData, BookEntry, ChapterResult, TranslationCode, Verse } from './types';
-import { readCachedBook, writeCachedBook } from './bibleCache';
+import { readCachedBook, writeCachedBook, reconcileDataVersion } from './bibleCache';
 
 export const BIBLE_BOOKS = booksCatalog as BookEntry[];
 
@@ -51,7 +51,31 @@ export function getNextChapter(bookName: string, chapter: number): { book: strin
   return next ? { book: next.name, chapter: 1 } : null;
 }
 
+/**
+ * Resolves once the cache has been reconciled against the shipped text version.
+ * Memoized so the manifest is fetched at most once per session, and awaited
+ * before any cached read so a stale book cannot be served first.
+ */
+let versionCheck: Promise<void> | null = null;
+
+function ensureCurrentData(): Promise<void> {
+  versionCheck ??= (async () => {
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}bibles/manifest.json`);
+      if (!response.ok) return;
+      const { version } = (await response.json()) as { version?: string };
+      if (!version) return;
+      if (await reconcileDataVersion(version)) memoryCache.clear();
+    } catch {
+      // A missing or unreachable manifest must not block reading.
+    }
+  })();
+  return versionCheck;
+}
+
 async function loadBook(bookName: string, translation: TranslationCode): Promise<BookData | null> {
+  await ensureCurrentData();
+
   const slug = slugify(bookName);
   const code = translation.toLowerCase();
   const key = `${code}:${slug}`;
@@ -164,4 +188,6 @@ export function computeVerseOffsets(verses: Verse[]): number[] {
 /** Test seam. */
 export function clearMemoryCache(): void {
   memoryCache.clear();
+  inFlight.clear();
+  versionCheck = null;
 }

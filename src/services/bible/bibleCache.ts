@@ -11,8 +11,10 @@ import { BookData } from './types';
  */
 
 const DB_NAME = 'scripture-voice';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'books';
+const META = 'meta';
+const DATA_VERSION_KEY = 'bibleDataVersion';
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
@@ -38,6 +40,9 @@ function openDb(): Promise<IDBDatabase | null> {
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE);
       }
+      if (!db.objectStoreNames.contains(META)) {
+        db.createObjectStore(META);
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
@@ -49,6 +54,47 @@ function openDb(): Promise<IDBDatabase | null> {
 
 export function cacheKey(translation: string, bookSlug: string): string {
   return `${translation}:${bookSlug}`;
+}
+
+/**
+ * Drops every cached book when the shipped text changes.
+ *
+ * Cached books previously had no version, so a reader who had already opened a
+ * chapter kept the old text indefinitely. That is how footnote-contaminated
+ * verses survived a corrected rebuild — the files on disk were clean while the
+ * app still served the bad copy from IndexedDB. A text correction that cannot
+ * reach the people already reading is not a correction.
+ */
+export async function reconcileDataVersion(version: string): Promise<boolean> {
+  const db = await openDb();
+  if (!db) return false;
+
+  const stored = await new Promise<string | null>((resolve) => {
+    try {
+      const request = db.transaction(META, 'readonly').objectStore(META).get(DATA_VERSION_KEY);
+      request.onsuccess = () => resolve((request.result as string) ?? null);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+
+  if (stored === version) return false;
+
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction([STORE, META], 'readwrite');
+      tx.objectStore(STORE).clear();
+      tx.objectStore(META).put(version, DATA_VERSION_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+
+  return stored !== null;
 }
 
 export async function readCachedBook(translation: string, bookSlug: string): Promise<BookData | null> {

@@ -50,10 +50,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * Routes by URL: the service fetches bibles/manifest.json once per session to
+ * reconcile the cache against the shipped text version, so a single blanket
+ * mock would have book reads answered with the manifest.
+ */
 function stubFetch(payload: unknown, ok = true) {
-  fetchMock = vi.fn().mockResolvedValue({ ok, json: async () => payload });
+  fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    if (String(url).includes('manifest.json')) {
+      return { ok: true, json: async () => ({ version: 'test-version' }) };
+    }
+    return { ok, json: async () => payload };
+  });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
+}
+
+/** Fetch calls for book files, excluding the manifest reconciliation. */
+function bookFetches(): string[] {
+  return fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => !u.includes('manifest.json'));
 }
 
 describe('loadChapter', () => {
@@ -72,7 +87,7 @@ describe('loadChapter', () => {
     const mock = stubFetch(GENESIS);
     await loadChapter('Genesis', 1, 'KJV');
 
-    const url = String(mock.mock.calls[0][0]);
+    const url = bookFetches()[0];
     expect(url).toContain('bibles/kjv/genesis.json');
     expect(url).not.toMatch(/^https?:\/\//);
   });
@@ -85,7 +100,7 @@ describe('loadChapter', () => {
 
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(bookFetches()).toHaveLength(1);
   });
 
   it('fetches once for repeated reads of the same book', async () => {
@@ -94,20 +109,72 @@ describe('loadChapter', () => {
     await loadChapter('Genesis', 1, 'KJV');
     await loadChapter('Genesis', 2, 'KJV').catch(() => undefined);
 
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(bookFetches()).toHaveLength(1);
   });
 
   it('serves a cached book after the in-memory layer is cleared', async () => {
-    const mock = stubFetch(GENESIS);
+    stubFetch(GENESIS);
     await loadChapter('Genesis', 1, 'KJV');
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(bookFetches()).toHaveLength(1);
 
     // Simulates a reload: session memory is gone, IndexedDB is not.
     clearMemoryCache();
     const result = await loadChapter('Genesis', 1, 'KJV');
 
     expect(result.ok).toBe(true);
-    expect(mock).toHaveBeenCalledTimes(1);
+    expect(bookFetches()).toHaveLength(1);
+  });
+
+  it('discards cached books when the shipped text version changes', async () => {
+    // This is how corrected text failed to reach a reader: the files on disk
+    // were fixed while IndexedDB kept serving footnote-contaminated verses.
+    const OLD = bookFixture('Genesis', { '1': [{ verse: 1, text: 'stale text.1.1 Heb. a footnote' }] });
+    const NEW = bookFixture('Genesis', { '1': [{ verse: 1, text: 'corrected text.' }] });
+
+    let version = 'v1';
+    let payload: unknown = OLD;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) =>
+        String(url).includes('manifest.json')
+          ? { ok: true, json: async () => ({ version }) }
+          : { ok: true, json: async () => payload }
+      )
+    );
+
+    const first = await loadChapter('Genesis', 1, 'KJV');
+    expect(first.ok && first.verses[0].text).toContain('stale');
+
+    // New build: text corrected, version bumped, session memory gone.
+    version = 'v2';
+    payload = NEW;
+    clearMemoryCache();
+
+    const second = await loadChapter('Genesis', 1, 'KJV');
+    expect(second.ok && second.verses[0].text).toBe('corrected text.');
+  });
+
+  it('keeps serving the cache when the version is unchanged', async () => {
+    stubFetch(GENESIS);
+    await loadChapter('Genesis', 1, 'KJV');
+    clearMemoryCache();
+    await loadChapter('Genesis', 1, 'KJV');
+
+    // One book fetch across both reads: the matching version left it alone.
+    expect(bookFetches()).toHaveLength(1);
+  });
+
+  it('still reads when the manifest is unreachable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) =>
+        String(url).includes('manifest.json')
+          ? { ok: false, json: async () => ({}) }
+          : { ok: true, json: async () => GENESIS }
+      )
+    );
+    const result = await loadChapter('Genesis', 1, 'KJV');
+    expect(result.ok).toBe(true);
   });
 
   it('keeps reading position when translation changes', async () => {

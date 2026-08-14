@@ -14,6 +14,7 @@
 
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -243,6 +244,7 @@ async function main() {
   const books = JSON.parse(await readFile(join(ROOT, 'src', 'data', 'books.json'), 'utf8'));
   const totalChapters = books.reduce((sum, b) => sum + b.chapters, 0);
   const failures = [];
+  const counts = {};
 
   console.log(
     `Building ${books.length} books x ${TRANSLATIONS.length} translations ` +
@@ -297,10 +299,28 @@ async function main() {
     }
 
     const files = (await readdir(dir)).filter((f) => f.endsWith('.json'));
+    counts[translation.code] = verseCount;
     console.log(
       `  ${translation.code}: ${files.length}/${books.length} books, ` +
         `${verseCount.toLocaleString()} verses (${built} built, ${skipped} cached)\n`
     );
+  }
+
+  // A version stamp so clients can discard cached books when the text changes.
+  // Without it, a reader who had already cached a chapter would keep seeing the
+  // old text forever — which is exactly how footnote-contaminated verses
+  // survived a corrected rebuild locally.
+  if (failures.length === 0) {
+    const version = createHash('sha256')
+      .update(JSON.stringify(counts) + TRANSLATIONS.map((t) => t.code).join(','))
+      .digest('hex')
+      .slice(0, 16);
+    await writeFile(
+      join(OUT_DIR, 'manifest.json'),
+      JSON.stringify({ version, builtAt: new Date().toISOString(), verseCounts: counts }, null, 2),
+      'utf8'
+    );
+    console.log(`  manifest version ${version}`);
   }
 
   return { failures, aborted: false };
