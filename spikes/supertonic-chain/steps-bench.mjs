@@ -1,17 +1,17 @@
 import ort from 'onnxruntime-web';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-ort.env.wasm.numThreads = 1; ort.env.logLevel = 'error';
+ort.env.wasm.numThreads = Number(process.env.THREADS || 4); ort.env.logLevel = 'error';
 const B = 'C:/Users/moses/Documents/Apps/Bible Reading App/public/models/supertonic-3';
 const SR=44100,HOP=512,DIM=24,CP=6;
 const idx = JSON.parse(await readFile(join(B,'onnx','unicode_indexer.json'),'utf8'));
 const sj = JSON.parse(await readFile(join(B,'voice_styles','F1.json'),'utf8'));
 const mk=(nd)=>{const f=[];(function w(x){Array.isArray(x)?x.forEach(w):f.push(x);})(nd.data);const d=[];let c=nd.data;while(Array.isArray(c)){d.push(c.length);c=c[0];}return new ort.Tensor('float32',Float32Array.from(f),d);};
 const sTtl=mk(sj.style_ttl), sDp=mk(sj.style_dp);
-for (const prec of ['.fp32','']) {
+for (const prec of ['']) {
   const L=(g)=>ort.InferenceSession.create(join(B,'onnx',`${g}${prec}.onnx`),{executionProviders:['wasm']});
   const [dp,te,ve,voc]=await Promise.all([L('duration_predictor'),L('text_encoder'),L('vector_estimator'),L('vocoder')]);
-  const T='In the beginning God created the heaven and the earth.';
+  const T='<en>In the beginning God created the heaven and the earth.</en>';
   const ids=[...T].map(c=>{const p=c.codePointAt(0);return p<idx.length?idx[p]:0;});
   const N=ids.length;
   const ti=new ort.Tensor('int64',BigInt64Array.from(ids.map(BigInt)),[1,N]);
