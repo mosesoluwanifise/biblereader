@@ -13,6 +13,13 @@ export const AVAILABLE_TRANSLATIONS: { code: TranslationCode; name: string }[] =
 /** Session-scoped layer in front of IndexedDB. */
 const memoryCache = new Map<string, BookData>();
 
+/**
+ * In-flight loads, keyed the same way as the cache. Without this, two mounts
+ * racing for the same book (React StrictMode, or a fast double navigation)
+ * both miss the cache and fetch the same file twice.
+ */
+const inFlight = new Map<string, Promise<BookData | null>>();
+
 /** Matches the on-disk filenames produced by scripts/build-bible-data.mjs. */
 export function slugify(bookName: string): string {
   return bookName.toLowerCase().replace(/\s+/g, '');
@@ -52,21 +59,33 @@ async function loadBook(bookName: string, translation: TranslationCode): Promise
   const inMemory = memoryCache.get(key);
   if (inMemory) return inMemory;
 
-  const cached = await readCachedBook(code, slug);
-  if (cached) {
-    memoryCache.set(key, cached);
-    return cached;
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+
+  const load = (async () => {
+    const cached = await readCachedBook(code, slug);
+    if (cached) {
+      memoryCache.set(key, cached);
+      return cached;
+    }
+
+    // Bundled asset — same origin, no API, no key. The service worker caches
+    // this on read (U10), which is what makes the offline promise real.
+    const response = await fetch(`${import.meta.env.BASE_URL}bibles/${code}/${slug}.json`);
+    if (!response.ok) return null;
+
+    const book = (await response.json()) as BookData;
+    memoryCache.set(key, book);
+    void writeCachedBook(code, slug, book);
+    return book;
+  })();
+
+  inFlight.set(key, load);
+  try {
+    return await load;
+  } finally {
+    inFlight.delete(key);
   }
-
-  // Bundled asset — same origin, no API, no key. The service worker caches
-  // this on read (U10), which is what makes the offline promise real.
-  const response = await fetch(`${import.meta.env.BASE_URL}bibles/${code}/${slug}.json`);
-  if (!response.ok) return null;
-
-  const book = (await response.json()) as BookData;
-  memoryCache.set(key, book);
-  void writeCachedBook(code, slug, book);
-  return book;
 }
 
 /**

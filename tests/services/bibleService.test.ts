@@ -77,6 +77,17 @@ describe('loadChapter', () => {
     expect(url).not.toMatch(/^https?:\/\//);
   });
 
+  it('fetches once when two loads race for the same book', async () => {
+    // React StrictMode double-mounts in development; both effects fire before
+    // either populates the cache.
+    const mock = stubFetch(GENESIS);
+    const [a, b] = await Promise.all([loadChapter('Genesis', 1, 'KJV'), loadChapter('Genesis', 1, 'KJV')]);
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
+
   it('fetches once for repeated reads of the same book', async () => {
     const mock = stubFetch(GENESIS);
     await loadChapter('Genesis', 1, 'KJV');
