@@ -75,7 +75,17 @@ KTD2. **Text ships as static per-book JSON under `public/bibles/`, committed to 
 
 KTD3. **Drive the four ONNX graphs directly with `onnxruntime-web`.** `@supertone/supertonic-web`, named in the origin document and the prior plan, does not exist on npm. No browser-ready wrapper exists: `supertonic` v0.0.1 is Node-shaped with no browser field, and `easy-supertonic-tts` depends on `onnxruntime-node`. *`onnxruntime-web` is already a dependency; the wrapper was always going to be ours to write.*
 
-KTD4. **Quantize to int8 in-house from the official `Supertone/supertonic-3` release.** fp32 is 380 MB — `vector_estimator.onnx` alone is 245 MB — against 138 MB for int8, with the duration predictor preserved as a separate graph. Third-party int8 packs were rejected on license-chain grounds: `csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11` carries no license tag, and `onnx-community/Supertonic-TTS-ONNX` ships no LICENSE file at all. *Self-quantizing keeps the license chain clean and removes an unpinned third-party dependency from a 138 MB critical-path asset.*
+KTD4. **Ship fp32 weights, not int8. Reversed after measurement.** Quantizing worked as a download saving — 380 MB down to 102.7 MB, with audio quality unaffected (rms 0.0760 against fp32's 0.0765). It failed as engineering. Dynamic int8 has no optimized WASM kernels, so it dequantizes per operation and runs roughly seven times slower:
+
+| flow steps | fp32 | int8 |
+| --- | --- | --- |
+| 2 | 1.79x realtime | 0.24x |
+| 4 | 1.11x realtime | 0.14x |
+| 8 | 0.62x | 0.08x |
+
+fp32 clears realtime at four steps on one WASM thread with no GPU; int8 never clears it at any step count. Synthesis slower than playback means an unbounded wait before first audio and a stall before every subsequent sentence — which is exactly how the int8 build behaved in manual testing. *Download size is a one-time cost that caching amortizes; throughput is paid on every sentence forever.*
+
+The build script still quantizes on request, and fp16 (~190 MB) remains worth measuring as a middle option. Model sourcing is unchanged: build from the official `Supertone/supertonic-3` release rather than third-party packs, since `csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11` carries no license tag and `onnx-community/Supertonic-TTS-ONNX` ships no LICENSE file at all.
 
 KTD5. **Word timing is interpolated within model-anchored sentence boundaries.** The U11 spike measured the real signature: `duration_predictor.onnx` takes `text_ids`, `style_dp`, and a rank-3 `text_mask`, and returns `duration` as a **single scalar** — total utterance seconds, not per-token durations. Verified to scale monotonically with text length at 88–145 wpm across two voice styles. Per-word timing is therefore not readable from the graph.
 
