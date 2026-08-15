@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web';
+import { softenAllCaps } from './wordTiming';
 
 /**
  * Runs Supertonic inference off the main thread.
@@ -216,7 +217,7 @@ async function synthesize(
 
   // Tag affects synthesis only; word timings are derived from the untagged
   // text by the caller, so the tag must not leak into the word list.
-  const ids = [...tagText(text)].map((ch) => {
+  const ids = [...tagText(softenAllCaps(text))].map((ch) => {
     const cp = ch.codePointAt(0) ?? 0;
     return cp < indexer!.length ? indexer![cp] : 0;
   });
