@@ -17,8 +17,9 @@ import { WordTimestamp } from '../tts/types';
  *    worker kept running chains nobody awaited. Stop now cancels by generation.
  *
  * Play waits for the Supertonic engine to finish loading before speaking —
- * no platform voice plays in the meantime. Synthesis is slower than realtime
- * on WASM, so sentences are produced one ahead of playback.
+ * no platform voice plays in the meantime. Synthesis only just clears realtime
+ * on WASM, so audio is banked ahead of the playhead rather than produced
+ * one sentence at a time.
  */
 
 export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused';
@@ -50,7 +51,6 @@ export class PlaybackController {
   private voiceId = '';
   private speed: number | undefined;
   private cursor = 0;
-  private prefetch: Promise<Chunk | null> | null = null;
 
   private rafId: number | null = null;
   private generation = 0;
@@ -74,6 +74,41 @@ export class PlaybackController {
    * better than a fixed gap does. Adding one on top double-counts the pause.
    */
   private static readonly SENTENCE_GAP = 0;
+
+  /**
+   * Audio banked before the first sentence is allowed to play.
+   *
+   * Playback used to start the moment sentence one existed, which left zero
+   * headroom. Measured per sentence on a 12-core desktop at 8 steps:
+   *
+   * | 85 chars | 5.83s audio | 4.97s | 1.17x |
+   * | 63 chars | 4.38s audio | 3.39s | 1.29x |
+   * | 11 chars | 1.38s audio | 1.65s | 0.83x |
+   *
+   * Ordinary verses run a surplus; short ones run a deficit, because the fixed
+   * cost of a chain (duration predictor, text encoder, 8 flow steps, vocoder)
+   * does not shrink with the text. Starting empty meant every deficit sentence
+   * was met with nothing in reserve, and each shortfall surfaced as
+   * `scheduleChunk` clamping to `currentTime` — a silence between verses that
+   * grew as the chapter ran on.
+   *
+   * Six seconds costs ~5s before the first word and absorbs roughly twenty
+   * consecutive short verses. Raise it for smoother playback on slower
+   * hardware, lower it for a quicker start.
+   */
+  private static readonly LEAD_IN_SECONDS = 6;
+
+  /**
+   * How far ahead of the playhead the producer is allowed to run.
+   *
+   * Without a ceiling it would synthesize the whole chapter, pinning the
+   * worker and holding every buffer in memory. With one, surplus earned on
+   * long sentences is banked to cover the short ones that run at a deficit —
+   * which is the whole point of the change. The old loop threw that surplus
+   * away, idling 0.3s before each sentence ended rather than working ahead.
+   * 20s is ~3.5 MB of float32 audio.
+   */
+  private static readonly BUFFER_HORIZON_SECONDS = 20;
 
   getState(): PlaybackState {
     return this.state;
@@ -172,28 +207,40 @@ export class PlaybackController {
 
       if (generation !== this.generation) return;
 
-      const context = this.ensureContext();
-      this.nextStartAt = context.currentTime;
-      this.startWordClock(generation);
+      // Sentences held back while the lead-in fills. `nextStartAt` stays 0
+      // until the first one is scheduled; `scheduleChunk` floors against
+      // `currentTime`, so the bank costs nothing on the audio timeline.
+      const banked: Chunk[] = [];
+      let bankedSeconds = 0;
+      let playing = false;
 
       while (this.cursor < this.sentences.length) {
-        const chunk = this.prefetch ? await this.prefetch : await this.synthesize(this.cursor, generation);
-        this.prefetch = null;
+        const index = this.cursor;
+        const chunk = await this.synthesize(index, generation);
         if (generation !== this.generation) return;
-        if (!chunk) {
-          this.cursor += 1;
-          continue;
+        this.cursor += 1;
+        if (!chunk) continue;
+
+        if (!playing) {
+          banked.push(chunk);
+          bankedSeconds += chunk.buffer.duration;
+          // Keep banking unless the target is met or the passage ran out —
+          // a passage shorter than the lead-in must not wait forever.
+          if (bankedSeconds < PlaybackController.LEAD_IN_SECONDS && this.cursor < this.sentences.length) continue;
+
+          playing = true;
+          this.startWordClock(generation);
+          for (let i = 0; i < banked.length; i += 1) {
+            this.scheduleChunk(banked[i], index - banked.length + 1 + i, generation);
+          }
+          banked.length = 0;
+        } else {
+          this.scheduleChunk(chunk, index, generation);
         }
 
-        const next = this.cursor + 1;
-        this.prefetch = next < this.sentences.length ? this.synthesize(next, generation) : null;
-
-        this.scheduleChunk(chunk, generation);
-        this.cursor += 1;
-
-        // Hand back control until this sentence is nearly over, leaving the
-        // next one time to be scheduled before the audio clock reaches it.
-        await this.waitUntil(this.nextStartAt - 0.3, generation);
+        // Produce freely until the horizon is reached, then idle. Waiting on
+        // the audio clock means a paused context suspends production too.
+        await this.waitUntil(this.nextStartAt - PlaybackController.BUFFER_HORIZON_SECONDS, generation);
         if (generation !== this.generation) return;
       }
 
@@ -215,7 +262,7 @@ export class PlaybackController {
   }
 
   /** Queues a sentence at the next free slot on the audio clock. */
-  private scheduleChunk(chunk: Chunk, generation: number): void {
+  private scheduleChunk(chunk: Chunk, index: number, generation: number): void {
     const context = this.ensureContext();
     const startAt = Math.max(context.currentTime, this.nextStartAt);
 
@@ -230,7 +277,7 @@ export class PlaybackController {
 
     if (generation === this.generation) {
       this.setState('playing');
-      this.callbacks.onSentence?.(this.cursor, this.sentences.length);
+      this.callbacks.onSentence?.(index, this.sentences.length);
     }
   }
 
@@ -339,7 +386,6 @@ export class PlaybackController {
 
     if (this.context && this.context.state === 'suspended') void this.context.resume();
 
-    this.prefetch = null;
     this.cursor = 0;
     this.nextStartAt = 0;
     this.setState('idle');

@@ -225,6 +225,80 @@ describe('sentence sequencing', () => {
   });
 });
 
+describe('buffering', () => {
+  /**
+   * The shipped defect: playback began the moment sentence one existed and
+   * kept exactly one sentence in flight, so with synthesis slower than
+   * realtime the deficit compounded and `scheduleChunk` clamped to
+   * `currentTime` — an audible silence between verses, growing as the passage
+   * ran on. These drive the audio clock at 10x so a slow producer can be
+   * simulated in under two seconds of wall time.
+   */
+  const SENTENCES = 12;
+  const SECONDS_EACH = 1;
+  /** 150 ms wall = 1.5 s of audio clock: synthesis at 1.5x slower than realtime. */
+  const SYNTH_WALL_MS = 150;
+
+  beforeEach(() => {
+    FakeAudioContext.SPEEDUP = 10;
+    (supertonicEngine.synthesizeSentence as unknown as { mockImplementation: (f: unknown) => void }).mockImplementation(
+      async (text: string) => {
+        await new Promise((r) => setTimeout(r, SYNTH_WALL_MS));
+        return {
+          audio: new Float32Array(44100 * SECONDS_EACH),
+          sampleRate: 44100,
+          duration: SECONDS_EACH,
+          words: interpolateWordTimings(text, SECONDS_EACH)
+        };
+      }
+    );
+  });
+
+  afterEach(() => {
+    FakeAudioContext.SPEEDUP = 1;
+  });
+
+  const passage = Array.from({ length: SENTENCES }, (_, i) => `Sentence number ${i}.`).join(' ');
+
+  it('banks a lead-in before the first sentence plays', async () => {
+    let synthesesWhenPlayingBegan = -1;
+    const controller = new PlaybackController();
+    controller.start(passage, 'F1', {
+      onStateChange: (s) => {
+        if (s === 'playing' && synthesesWhenPlayingBegan === -1) {
+          synthesesWhenPlayingBegan = (supertonicEngine.synthesizeSentence as unknown as { mock: { calls: unknown[] } })
+            .mock.calls.length;
+        }
+      }
+    });
+
+    await settle(2600);
+    controller.stop();
+
+    // LEAD_IN_SECONDS is 6, at one second of audio per sentence. Asserted
+    // loosely so tuning the constant does not break the test — what matters
+    // is that playback no longer begins on a single sentence, as it did.
+    expect(synthesesWhenPlayingBegan).toBeGreaterThanOrEqual(5);
+  });
+
+  it('plays contiguously when synthesis runs slower than realtime', async () => {
+    const controller = new PlaybackController();
+    controller.start(passage, 'F1');
+
+    await settle(2600);
+    const context = FakeAudioContext.live[0];
+    const starts = context.startTimes;
+    controller.stop();
+
+    expect(starts.length).toBeGreaterThanOrEqual(SENTENCES);
+    // Every sentence butts against the end of the one before it. A producer
+    // that fell behind would show a start time later than the previous end.
+    for (let i = 1; i < starts.length; i += 1) {
+      expect(starts[i] - starts[i - 1]).toBeCloseTo(SECONDS_EACH, 5);
+    }
+  });
+});
+
 describe('stop', () => {
   it('abandons in-flight playback and resets to idle', async () => {
     const onEnd = vi.fn();
