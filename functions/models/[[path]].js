@@ -49,7 +49,11 @@ export async function onRequestGet(context) {
   const segments = Array.isArray(params.path) ? params.path : [params.path].filter(Boolean);
   if (segments.length === 0) return new Response('Not found', { status: 404 });
 
-  const key = `supertonic-3/${segments.join('/')}`;
+  // The URL already carries the supertonic-3/ prefix (modelBase in
+  // synthesis.worker.ts is '/models/supertonic-3'), matching the prefix
+  // R2 objects are stored under (see upload-models-to-r2.mjs) — segments
+  // is that path as-is, not a suffix needing the prefix added again.
+  const key = segments.join('/');
   const requestedRange = parseRange(request.headers.get('range'));
 
   const object = await env.MODELS.get(key, requestedRange ? { range: requestedRange } : undefined);
