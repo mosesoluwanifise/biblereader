@@ -1,29 +1,19 @@
-import { supertonicEngine, EngineCancelled } from '../tts/supertonicEngine';
-import { splitSentences } from '../tts/wordTiming';
-import { WordTimestamp } from '../tts/types';
+import { planSynthesisChunks } from '../tts/chunkPlanner';
+import { recordTtsDiagnostic } from '../tts/diagnostics';
+import { supertonicEngine } from '../tts/supertonicEngine';
+import {
+  PreparationCancelled,
+  synthesisCoordinator,
+  type SynthesisPreparationRequest
+} from '../tts/synthesisCoordinator';
+import type {
+  PassageSynthesisIdentity,
+  PreparedSynthesisChunk,
+  WordTimestamp
+} from '../tts/types';
 import { MediaElementSink } from './mediaElementSink';
 
-/**
- * Owns audio playback for a passage.
- *
- * Shaped by defects that actually shipped:
- *  - Auto-advance ran off a setTimeout holding a stale closure, so it replayed
- *    the previous chapter. Advance is now a callback the caller drives.
- *  - Pause called speechSynthesis.cancel(), discarding position. Pause now
- *    suspends the AudioContext; resume continues from the same offset.
- *  - Play awaited a network fetch before speaking, severing the iOS user
- *    gesture. The AudioContext is created and unlocked synchronously in
- *    `start`, before any await.
- *  - Stopping abandoned in-flight inference without cancelling it, so the
- *    worker kept running chains nobody awaited. Stop now cancels by generation.
- *
- * Play waits for the Supertonic engine to finish loading before speaking —
- * no platform voice plays in the meantime. Synthesis only just clears realtime
- * on WASM, so audio is banked ahead of the playhead rather than produced
- * one sentence at a time.
- */
-
-export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused';
+export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'device-too-slow';
 
 export interface PlaybackCallbacks {
   onWord?: (globalWordIndex: number) => void;
@@ -34,83 +24,52 @@ export interface PlaybackCallbacks {
   onError?: (message: string) => void;
 }
 
-interface Chunk {
-  text: string;
-  wordOffset: number;
+interface ScheduledChunk {
+  prepared: PreparedSynthesisChunk;
   buffer: AudioBuffer;
-  words: WordTimestamp[];
+  startAt: number;
+  endAt: number;
+  source: AudioBufferSourceNode;
 }
 
+interface CoordinatorPort {
+  prepare(request: SynthesisPreparationRequest): Promise<PreparedSynthesisChunk>;
+  cancelScope(scope: 'foreground' | 'speculative'): void;
+  clearPrepared(slot?: 'current' | 'next'): void;
+}
+
+class DeviceTooSlow extends Error {
+  constructor() {
+    super('This device cannot synthesize narration fast enough for continuous playback. Please retry.');
+    this.name = 'DeviceTooSlow';
+  }
+}
+
+/** Owns bounded synthesis scheduling and audio-clock playback for one passage. */
 export class PlaybackController {
   private context: AudioContext | null = null;
   private sink: MediaElementSink | null = null;
-  private source: AudioBufferSourceNode | null = null;
   private state: PlaybackState = 'idle';
   private callbacks: PlaybackCallbacks = {};
-
-  private sentences: string[] = [];
-  private wordOffsets: number[] = [];
-  private voiceId = '';
-  private speed: number | undefined;
-  private cursor = 0;
-
   private rafId: number | null = null;
   private generation = 0;
-
-  /**
-   * Next free position on the AudioContext timeline.
-   *
-   * Sentences are scheduled contiguously against the audio clock rather than
-   * started from the previous buffer's `onended`. That callback fires a JS
-   * event-loop turn *after* the audio has ended, so starting there left a
-   * short silence at every join — audible as choppy, glitchy playback.
-   */
+  private activeRequestKey: string | null = null;
   private nextStartAt = 0;
-  private scheduled: { chunk: Chunk; startAt: number; endAt: number; source: AudioBufferSourceNode }[] = [];
+  private scheduled: ScheduledChunk[] = [];
+  private reportedSentences = new Set<number>();
+  private totalSentences = 0;
+  private playbackStarted = false;
+  private lowWaterSeconds = Number.POSITIVE_INFINITY;
+  private underrunCount = 0;
+  private underrunDurationMs = 0;
+  private slowUnderrunEvidence = 0;
+  private platformInterruptionCount = 0;
 
-  /**
-   * Extra pause inserted between sentences.
-   *
-   * Zero on purpose. Utterances arrive with the model's own leading and
-   * trailing silence intact, which already spaces sentences and phrases them
-   * better than a fixed gap does. Adding one on top double-counts the pause.
-   */
-  private static readonly SENTENCE_GAP = 0;
-
-  /**
-   * Audio banked before the first sentence is allowed to play.
-   *
-   * Playback used to start the moment sentence one existed, which left zero
-   * headroom. Measured per sentence on a 12-core desktop at 8 steps:
-   *
-   * | 85 chars | 5.83s audio | 4.97s | 1.17x |
-   * | 63 chars | 4.38s audio | 3.39s | 1.29x |
-   * | 11 chars | 1.38s audio | 1.65s | 0.83x |
-   *
-   * Ordinary verses run a surplus; short ones run a deficit, because the fixed
-   * cost of a chain (duration predictor, text encoder, 8 flow steps, vocoder)
-   * does not shrink with the text. Starting empty meant every deficit sentence
-   * was met with nothing in reserve, and each shortfall surfaced as
-   * `scheduleChunk` clamping to `currentTime` — a silence between verses that
-   * grew as the chapter ran on.
-   *
-   * Six seconds costs ~5s before the first word and absorbs roughly twenty
-   * consecutive short verses. Raise it for smoother playback on slower
-   * hardware, lower it for a quicker start.
-   */
-  private static readonly LEAD_IN_SECONDS = 6;
-
-  /**
-   * How far ahead of the playhead the producer is allowed to run.
-   *
-   * Without a ceiling it would synthesize the whole chapter, pinning the
-   * worker and holding every buffer in memory. With one, surplus earned on
-   * long sentences is banked to cover the short ones that run at a deficit —
-   * which is the whole point of the change. The old loop threw that surplus
-   * away, idling 0.3s before each sentence ended rather than working ahead.
-   * 20s is ~3.5 MB of float32 audio.
-   */
   private static readonly BUFFER_HORIZON_SECONDS = 20;
+  private static readonly UNDERRUN_TOLERANCE_SECONDS = 0.02;
+  private static readonly DEVICE_TOO_SLOW_UNDERRUNS = 2;
+
+  constructor(private readonly coordinator: CoordinatorPort = synthesisCoordinator) {}
 
   getState(): PlaybackState {
     return this.state;
@@ -122,49 +81,38 @@ export class PlaybackController {
     this.callbacks.onStateChange?.(next);
   }
 
-  /**
-   * Must be called directly inside a user gesture — it creates and resumes the
-   * AudioContext before awaiting anything, which is what iOS requires.
-   */
+  /** Creates and unlocks audio synchronously inside the user gesture. */
   start(
     text: string,
     voiceId: string,
     callbacks: PlaybackCallbacks = {},
     startWordOffset = 0,
-    speed?: number
+    speed?: number,
+    identity?: PassageSynthesisIdentity
   ): void {
+    const requestKey = JSON.stringify([text, voiceId, startWordOffset, speed ?? null, identity ?? null]);
+    if (this.state === 'preparing' && requestKey === this.activeRequestKey) {
+      const context = this.ensureContext();
+      void context.resume();
+      this.ensureSink().activate();
+      return;
+    }
+
     this.stop();
-    this.generation += 1;
     const generation = this.generation;
-
     this.callbacks = callbacks;
-    this.voiceId = voiceId;
-    this.speed = speed;
+    this.activeRequestKey = requestKey;
+    this.resetMetrics();
 
-    // Synchronous, pre-await: keeps the gesture chain intact. The media
-    // element has the same requirement as the context — it has to be started
-    // from inside the gesture or the browser refuses it.
     const context = this.ensureContext();
     void context.resume();
     this.ensureSink().activate();
-
-    this.sentences = splitSentences(text);
-    this.wordOffsets = [];
-    let running = startWordOffset;
-    for (const sentence of this.sentences) {
-      this.wordOffsets.push(running);
-      running += sentence.trim().split(/\s+/).filter(Boolean).length;
-    }
-
-    this.cursor = 0;
     this.setState('preparing');
-
-    void this.run(generation);
+    void this.run(text, voiceId, startWordOffset, speed, identity, generation);
   }
 
   private ensureContext(): AudioContext {
     if (!this.context || this.context.state === 'closed') {
-      // A sink belongs to the context it was built from, so it goes with it.
       this.sink?.release();
       this.sink = null;
       this.context = new AudioContext();
@@ -172,146 +120,174 @@ export class PlaybackController {
     return this.context;
   }
 
-  /**
-   * The node sources connect to. Routing through a media element rather than
-   * straight to the speakers is what lets playback survive the screen locking
-   * — see MediaElementSink.
-   */
   private ensureSink(): MediaElementSink {
     const context = this.ensureContext();
     if (!this.sink) this.sink = new MediaElementSink(context);
     return this.sink;
   }
 
-  private async synthesize(index: number, generation: number): Promise<Chunk | null> {
-    if (index >= this.sentences.length) return null;
-    const context = this.ensureContext();
-    const result = await supertonicEngine.synthesizeSentence(
-      this.sentences[index],
-      this.voiceId,
-      undefined,
-      undefined,
-      this.speed
-    );
-    if (generation !== this.generation) return null;
-    if (result.audio.length === 0) return null;
-
-    // ONNX output may be backed by a SharedArrayBuffer when threaded WASM is
-    // active, which copyToChannel will not accept. Copy into a plain buffer.
-    const samples = new Float32Array(result.audio.length);
-    samples.set(result.audio);
-
-    const buffer = context.createBuffer(1, samples.length, result.sampleRate);
-    buffer.copyToChannel(samples, 0);
-    return {
-      text: this.sentences[index],
-      wordOffset: this.wordOffsets[index],
-      buffer,
-      words: result.words
-    };
-  }
-
-  private async run(generation: number): Promise<void> {
+  private async run(
+    text: string,
+    voiceId: string,
+    startWordOffset: number,
+    speed: number | undefined,
+    suppliedIdentity: PassageSynthesisIdentity | undefined,
+    generation: number
+  ): Promise<void> {
     try {
-      // Stay in 'preparing' — no platform voice — until the real engine is
-      // ready. A ~383 MB first download means this can take a while, but
-      // speaking on a system voice first was more confusing than silence: it
-      // read as the finished product on a slower connection.
       if (!supertonicEngine.isReady()) {
-        await supertonicEngine.load((p) => {
-          if (generation === this.generation) this.callbacks.onModelProgress?.(p.loaded / p.total);
+        await supertonicEngine.load((progress) => {
+          if (generation === this.generation) this.callbacks.onModelProgress?.(progress.loaded / progress.total);
         });
         if (generation === this.generation) this.callbacks.onModelProgress?.(null);
       }
-
       if (generation !== this.generation) return;
 
-      // Sentences held back while the lead-in fills. `nextStartAt` stays 0
-      // until the first one is scheduled; `scheduleChunk` floors against
-      // `currentTime`, so the bank costs nothing on the audio timeline.
-      const banked: Chunk[] = [];
-      let bankedSeconds = 0;
-      let playing = false;
+      const runtime = supertonicEngine.getRuntimeInfo();
+      if (!runtime) throw new Error('Engine runtime is unavailable after loading');
+      const identity =
+        suppliedIdentity ??
+        anonymousIdentity(text, voiceId, startWordOffset, speed ?? 1.05, runtime);
+      if (
+        suppliedIdentity &&
+        (identity.sourceText !== text ||
+          identity.startWordOffset !== startWordOffset ||
+          identity.voiceId !== voiceId ||
+          identity.speed !== (speed ?? 1.05))
+      ) {
+        throw new Error('Playback arguments do not match the supplied passage identity');
+      }
+      const chunks = planSynthesisChunks(text, { startWordOffset });
+      this.totalSentences = chunks.reduce((count, chunk) => count + chunk.segments.length, 0);
+      if (chunks.length === 0) {
+        this.finish(generation);
+        return;
+      }
 
-      while (this.cursor < this.sentences.length) {
-        const index = this.cursor;
-        const chunk = await this.synthesize(index, generation);
-        if (generation !== this.generation) return;
-        this.cursor += 1;
-        if (!chunk) continue;
-
-        if (!playing) {
-          banked.push(chunk);
-          bankedSeconds += chunk.buffer.duration;
-          // Keep banking unless the target is met or the passage ran out —
-          // a passage shorter than the lead-in must not wait forever.
-          if (bankedSeconds < PlaybackController.LEAD_IN_SECONDS && this.cursor < this.sentences.length) continue;
-
-          playing = true;
-          this.startWordClock(generation);
-          for (let i = 0; i < banked.length; i += 1) {
-            this.scheduleChunk(banked[i], index - banked.length + 1 + i, generation);
-          }
-          banked.length = 0;
-        } else {
-          this.scheduleChunk(chunk, index, generation);
+      for (const chunk of chunks) {
+        if (this.playbackStarted) {
+          this.observeLowWater();
+          await this.waitUntil(this.nextStartAt - PlaybackController.BUFFER_HORIZON_SECONDS, generation);
         }
-
-        // Produce freely until the horizon is reached, then idle. Waiting on
-        // the audio clock means a paused context suspends production too.
-        await this.waitUntil(this.nextStartAt - PlaybackController.BUFFER_HORIZON_SECONDS, generation);
         if (generation !== this.generation) return;
+
+        const prepared = await this.coordinator.prepare({
+          identity,
+          chunk,
+          priority: 'foreground',
+          slot: chunk.kind === 'startup' ? 'current' : undefined
+        });
+        if (generation !== this.generation) return;
+        this.scheduleChunk(prepared, generation);
+        if (!this.playbackStarted) {
+          this.playbackStarted = true;
+          this.setState('playing');
+          this.startWordClock(generation);
+        }
       }
 
       await this.waitUntil(this.nextStartAt, generation);
-      if (generation !== this.generation) return;
-      this.finish(generation);
-    } catch (err) {
-      if (generation !== this.generation || err instanceof EngineCancelled) return;
-      this.setState('idle');
-      this.callbacks.onError?.((err as Error)?.message ?? 'Playback failed');
+      if (generation === this.generation) this.finish(generation);
+    } catch (error) {
+      if (error instanceof PreparationCancelled) {
+        recordTtsDiagnostic({
+          phase: 'playback',
+          cancellationLatencyMs: error.latencyMs,
+          outcome: 'success'
+        });
+      }
+      if (generation !== this.generation || error instanceof PreparationCancelled) return;
+      this.fail(error as Error, error instanceof DeviceTooSlow ? 'device-too-slow' : 'idle');
     }
   }
 
-  private finish(generation: number): void {
-    if (generation !== this.generation) return;
-    this.setState('idle');
-    this.callbacks.onWord?.(-1);
-    this.callbacks.onEnd?.();
-  }
-
-  /** Queues a sentence at the next free slot on the audio clock. */
-  private scheduleChunk(chunk: Chunk, index: number, generation: number): void {
+  private scheduleChunk(prepared: PreparedSynthesisChunk, generation: number): void {
     const context = this.ensureContext();
-    const startAt = Math.max(context.currentTime, this.nextStartAt);
+    const hadTimeline = this.playbackStarted && this.nextStartAt > 0;
+    const expectedAt = this.nextStartAt;
+    const lateBy = context.currentTime - expectedAt;
+    if (hadTimeline) {
+      const aheadBeforeScheduling = Math.max(0, expectedAt - context.currentTime);
+      this.lowWaterSeconds = Math.min(this.lowWaterSeconds, aheadBeforeScheduling);
+      recordTtsDiagnostic({
+        phase: 'playback',
+        scheduledAheadSeconds: aheadBeforeScheduling,
+        bufferLowWaterSeconds: this.lowWaterSeconds,
+        underrunCount: this.underrunCount,
+        underrunDurationMs: this.underrunDurationMs,
+        platformInterruptionCount: this.platformInterruptionCount,
+        outcome: 'success'
+      });
+    }
+    if (hadTimeline && context.state !== 'running' && this.state !== 'paused') {
+      this.platformInterruptionCount += 1;
+      recordTtsDiagnostic({
+        phase: 'playback',
+        platformInterruptionCount: this.platformInterruptionCount,
+        scheduledAheadSeconds: Math.max(0, expectedAt - context.currentTime),
+        outcome: 'failure'
+      });
+    }
+    if (
+      hadTimeline &&
+      context.state === 'running' &&
+      lateBy > PlaybackController.UNDERRUN_TOLERANCE_SECONDS
+    ) {
+      this.underrunCount += 1;
+      this.underrunDurationMs += lateBy * 1000;
+      if (prepared.productionFactor < 1) this.slowUnderrunEvidence += 1;
+      recordTtsDiagnostic({
+        phase: 'playback',
+        underrunCount: this.underrunCount,
+        underrunDurationMs: this.underrunDurationMs,
+        scheduledAheadSeconds: 0,
+        realtimeFactor: prepared.productionFactor,
+        outcome: 'failure'
+      });
+      if (
+        this.underrunCount >= PlaybackController.DEVICE_TOO_SLOW_UNDERRUNS &&
+        this.slowUnderrunEvidence >= PlaybackController.DEVICE_TOO_SLOW_UNDERRUNS
+      ) {
+        throw new DeviceTooSlow();
+      }
+    }
 
+    const samples = new Float32Array(prepared.audio.length);
+    samples.set(prepared.audio);
+    const buffer = context.createBuffer(1, samples.length, prepared.sampleRate);
+    buffer.copyToChannel(samples, 0);
+
+    const startAt = Math.max(context.currentTime, expectedAt);
     const source = context.createBufferSource();
-    source.buffer = chunk.buffer;
+    source.buffer = buffer;
     source.connect(this.ensureSink().node);
     source.start(startAt);
-
-    const endAt = startAt + chunk.buffer.duration;
-    this.scheduled.push({ chunk, startAt, endAt, source });
-    this.nextStartAt = endAt + PlaybackController.SENTENCE_GAP;
-
-    if (generation === this.generation) {
-      this.setState('playing');
-      this.callbacks.onSentence?.(index, this.sentences.length);
-    }
+    const endAt = startAt + buffer.duration;
+    this.scheduled.push({ prepared, buffer, startAt, endAt, source });
+    this.nextStartAt = endAt;
+    if (generation === this.generation) this.observeLowWater();
   }
 
-  /**
-   * Resolves when the audio clock reaches `when`. Polls rather than using a
-   * single timer because the clock stops while the context is suspended, so a
-   * wall-clock timer would fire early after a pause.
-   */
+  private observeLowWater(): void {
+    if (!this.context || !this.playbackStarted) return;
+    const ahead = Math.max(0, this.nextStartAt - this.context.currentTime);
+    this.lowWaterSeconds = Math.min(this.lowWaterSeconds, ahead);
+    recordTtsDiagnostic({
+      phase: 'playback',
+      scheduledAheadSeconds: ahead,
+      bufferLowWaterSeconds: this.lowWaterSeconds,
+      underrunCount: this.underrunCount,
+      underrunDurationMs: this.underrunDurationMs,
+      platformInterruptionCount: this.platformInterruptionCount,
+      outcome: 'success'
+    });
+  }
+
   private waitUntil(when: number, generation: number): Promise<void> {
     return new Promise((resolve) => {
       const check = () => {
-        if (generation !== this.generation) return resolve();
-        const context = this.context;
-        if (!context) return resolve();
-        const remaining = when - context.currentTime;
+        if (generation !== this.generation || !this.context) return resolve();
+        const remaining = when - this.context.currentTime;
         if (remaining <= 0) return resolve();
         setTimeout(check, Math.min(200, Math.max(20, remaining * 1000)));
       };
@@ -321,59 +297,52 @@ export class PlaybackController {
 
   private startWordClock(generation: number): void {
     this.stopWordClock();
-    let lastIndex = -2;
-
+    let lastWord = -2;
     const tick = () => {
       if (generation !== this.generation || !this.context) return;
       const now = this.context.currentTime;
+      for (const entry of this.scheduled) {
+        if (now < entry.startAt) continue;
+        this.reportAudibleSegments(entry, Math.min(entry.buffer.duration, now - entry.startAt));
+      }
 
-      // Which scheduled sentence is audible right now.
-      const entry = this.scheduled.find((s) => now >= s.startAt && now < s.endAt);
-      if (entry) {
-        const elapsed = now - entry.startAt;
-        const words = entry.chunk.words;
-        let active = -1;
-        for (let i = 0; i < words.length; i += 1) {
-          if (elapsed >= words[i].start && elapsed < words[i].end) {
-            active = i;
-            break;
-          }
+      const active = this.scheduled.find((entry) => now >= entry.startAt && now < entry.endAt);
+      if (active) {
+        const globalWord = activeGlobalWord(active, now - active.startAt);
+        if (globalWord !== null && globalWord !== lastWord) {
+          lastWord = globalWord;
+          this.callbacks.onWord?.(globalWord);
         }
-        if (active !== -1) {
-          const globalIndex = entry.chunk.wordOffset + active;
-          if (globalIndex !== lastIndex) {
-            lastIndex = globalIndex;
-            this.callbacks.onWord?.(globalIndex);
-          }
-        }
-        // Sentences already finished cannot become audible again.
-        if (this.scheduled.length > 4) {
-          this.scheduled = this.scheduled.filter((s) => s.endAt > now - 1);
-        }
+      }
+      if (this.scheduled.length > 4) {
+        this.scheduled = this.scheduled.filter((entry) => entry.endAt > now - 1);
       }
       this.rafId = requestAnimationFrame(tick);
     };
-
     this.rafId = requestAnimationFrame(tick);
   }
 
-  private stopWordClock(): void {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
+  private reportAudibleSegments(entry: ScheduledChunk, elapsed: number): void {
+    let wordCursor = 0;
+    for (const segment of entry.prepared.chunk.segments) {
+      const firstWord = entry.prepared.words[wordCursor];
+      const audibleAt = firstWord?.start ?? 0;
+      if (elapsed >= audibleAt && !this.reportedSentences.has(segment.sentenceIndex)) {
+        this.reportedSentences.add(segment.sentenceIndex);
+        this.callbacks.onSentence?.(segment.sentenceIndex, this.totalSentences);
+      }
+      wordCursor += segment.wordCount;
     }
   }
 
-  /**
-   * Suspends without losing position. Suspending stops the AudioContext clock,
-   * so scheduled start times stay valid relative to it and resume continues
-   * exactly where it left off — no bookkeeping required.
-   */
+  private stopWordClock(): void {
+    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    this.rafId = null;
+  }
+
   async pause(): Promise<void> {
     if (this.state !== 'playing' || !this.context) return;
     await this.context.suspend();
-    // A suspended graph feeds the element silence, which it would happily go
-    // on "playing" — leaving the lock screen claiming we are still reading.
     this.sink?.pause();
     this.stopWordClock();
     this.setState('paused');
@@ -389,34 +358,106 @@ export class PlaybackController {
 
   stop(): void {
     this.generation += 1;
+    this.coordinator.cancelScope('foreground');
+    this.stopSources();
     this.stopWordClock();
+    if (this.context?.state === 'suspended') void this.context.resume();
+    this.sink?.pause();
+    this.activeRequestKey = null;
+    this.callbacks.onWord?.(-1);
+    this.resetMetrics();
+    this.setState('idle');
+  }
 
-    // Tell the worker to abandon queued and in-flight chains. Dropping the
-    // promise reference alone left them running on shared sessions.
-    supertonicEngine.cancelInFlight();
+  private finish(generation: number): void {
+    if (generation !== this.generation) return;
+    for (const entry of this.scheduled) this.reportAudibleSegments(entry, entry.buffer.duration);
+    this.stopWordClock();
+    this.activeRequestKey = null;
+    this.setState('idle');
+    this.callbacks.onWord?.(-1);
+    this.callbacks.onEnd?.();
+  }
 
-    // Everything queued ahead on the audio clock must be cancelled too, or
-    // sentences scheduled into the future keep playing after stop.
+  private fail(error: Error, state: PlaybackState): void {
+    this.coordinator.cancelScope('foreground');
+    this.coordinator.clearPrepared('current');
+    this.stopSources();
+    this.stopWordClock();
+    this.sink?.pause();
+    this.activeRequestKey = null;
+    this.callbacks.onWord?.(-1);
+    this.setState(state);
+    this.callbacks.onError?.(error.message || 'Playback failed');
+  }
+
+  private stopSources(): void {
     for (const entry of this.scheduled) {
       try {
         entry.source.stop();
       } catch {
-        /* already stopped or never started */
+        // Source may already have ended.
       }
       entry.source.disconnect();
     }
     this.scheduled = [];
-
-    if (this.context && this.context.state === 'suspended') void this.context.resume();
-
-    // Hand the media session back. Left playing, the lock screen would keep
-    // offering transport controls for a chapter that is no longer running.
-    this.sink?.pause();
-
-    this.cursor = 0;
     this.nextStartAt = 0;
-    this.setState('idle');
   }
+
+  private resetMetrics(): void {
+    this.nextStartAt = 0;
+    this.scheduled = [];
+    this.reportedSentences.clear();
+    this.totalSentences = 0;
+    this.playbackStarted = false;
+    this.lowWaterSeconds = Number.POSITIVE_INFINITY;
+    this.underrunCount = 0;
+    this.underrunDurationMs = 0;
+    this.slowUnderrunEvidence = 0;
+    this.platformInterruptionCount = 0;
+  }
+}
+
+function activeGlobalWord(entry: ScheduledChunk, elapsed: number): number | null {
+  let wordCursor = 0;
+  for (const segment of entry.prepared.chunk.segments) {
+    const segmentWords = entry.prepared.words.slice(wordCursor, wordCursor + segment.wordCount);
+    const local = activeWordIndex(segmentWords, elapsed);
+    if (local !== null) return segment.wordOffset + local;
+    wordCursor += segment.wordCount;
+  }
+  return null;
+}
+
+function activeWordIndex(words: WordTimestamp[], elapsed: number): number | null {
+  for (let index = 0; index < words.length; index += 1) {
+    if (elapsed >= words[index].start && elapsed < words[index].end) return index;
+  }
+  return null;
+}
+
+function anonymousIdentity(
+  text: string,
+  voiceId: string,
+  startWordOffset: number,
+  speed: number,
+  runtime: NonNullable<ReturnType<typeof supertonicEngine.getRuntimeInfo>>
+): PassageSynthesisIdentity {
+  return {
+    translation: '__anonymous__',
+    book: '__selection__',
+    chapter: 0,
+    sourceTextVersion: 'inline-v1',
+    sourceText: text,
+    startingVerse: 0,
+    startWordOffset,
+    voiceId,
+    speed,
+    steps: runtime.steps,
+    provider: runtime.provider,
+    modelVersion: runtime.modelVersion,
+    runtimeVersion: runtime.ortVersion
+  };
 }
 
 export const playbackController = new PlaybackController();

@@ -1,4 +1,4 @@
-export type DiagnosticPhase = 'download' | 'compile' | 'warmup' | 'synthesis' | 'provider-fallback';
+export type DiagnosticPhase = 'download' | 'compile' | 'warmup' | 'synthesis' | 'provider-fallback' | 'playback';
 
 export interface TtsDiagnostic {
   at: number;
@@ -8,6 +8,12 @@ export interface TtsDiagnostic {
   steps?: number;
   audioSeconds?: number;
   realtimeFactor?: number;
+  scheduledAheadSeconds?: number;
+  bufferLowWaterSeconds?: number;
+  underrunCount?: number;
+  underrunDurationMs?: number;
+  cancellationLatencyMs?: number;
+  platformInterruptionCount?: number;
   outcome?: 'start' | 'success' | 'failure';
 }
 
@@ -24,6 +30,12 @@ export function recordTtsDiagnostic(event: Omit<TtsDiagnostic, 'at'> & { at?: nu
     steps: finite(event.steps),
     audioSeconds: finite(event.audioSeconds),
     realtimeFactor: finite(event.realtimeFactor),
+    scheduledAheadSeconds: finite(event.scheduledAheadSeconds),
+    bufferLowWaterSeconds: finite(event.bufferLowWaterSeconds),
+    underrunCount: finite(event.underrunCount),
+    underrunDurationMs: finite(event.underrunDurationMs),
+    cancellationLatencyMs: finite(event.cancellationLatencyMs),
+    platformInterruptionCount: finite(event.platformInterruptionCount),
     outcome: event.outcome
   };
   events.push(safe);
