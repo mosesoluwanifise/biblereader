@@ -4,7 +4,8 @@ import {
   splitSentences,
   weightOf,
   pauseWeightOf,
-  offsetTimings
+  offsetTimings,
+  softenAllCaps
 } from '../../src/services/tts/wordTiming';
 
 describe('interpolateWordTimings', () => {
@@ -207,5 +208,45 @@ describe('sentence anchoring across a passage', () => {
     }
 
     expect(clock).toBeCloseTo(durations.reduce((a, b) => a + b, 0), 9);
+  });
+});
+
+describe('softenAllCaps', () => {
+  it('folds the KJV divine-name capitals so they are not spelled out', () => {
+    // The shipped bug: the model treats a run of capitals as an initialism, so
+    // small-caps LORD/GOD were narrated "L-O-R-D".
+    expect(softenAllCaps('the LORD God formed man')).toBe('the Lord God formed man');
+    expect(softenAllCaps('O LORD GOD of Israel')).toBe('O Lord God of Israel');
+    expect(softenAllCaps("the LORD's anointed")).toBe("the Lord's anointed");
+    expect(softenAllCaps("the LORD'S house")).toBe("the Lord's house");
+  });
+
+  it('leaves single capitals and ordinary capitalisation alone', () => {
+    expect(softenAllCaps('In the beginning God created the heaven.')).toBe(
+      'In the beginning God created the heaven.'
+    );
+    // "I" and "O" are words in their own right in this text.
+    expect(softenAllCaps('I am the LORD thy God')).toBe('I am the Lord thy God');
+  });
+
+  it('handles wholly capitalised phrases', () => {
+    expect(softenAllCaps('I AM THAT I AM')).toBe('I Am That I Am');
+    expect(softenAllCaps('MENE, MENE, TEKEL, UPHARSIN')).toBe('Mene, Mene, Tekel, Upharsin');
+  });
+
+  it('changes case only, so word timings stay aligned to the original text', () => {
+    // Timings are interpolated from the displayed text while the model reads
+    // the softened text; if these ever diverged in length or word count the
+    // highlight would drift off the voice.
+    for (const text of [
+      'the LORD God formed man',
+      "the LORD'S house",
+      'I AM THAT I AM',
+      'MENE, MENE, TEKEL, UPHARSIN'
+    ]) {
+      const softened = softenAllCaps(text);
+      expect(softened).toHaveLength(text.length);
+      expect(softened.split(/\s+/)).toHaveLength(text.split(/\s+/).length);
+    }
   });
 });

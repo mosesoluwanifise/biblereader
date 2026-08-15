@@ -124,3 +124,20 @@ export function splitSentences(text: string, maxChars = 240): string[] {
 export function offsetTimings(timings: WordTimestamp[], seconds: number): WordTimestamp[] {
   return timings.map((t) => ({ ...t, start: t.start + seconds, end: t.end + seconds }));
 }
+
+/**
+ * Folds runs of capitals to title case for the synthesizer.
+ *
+ * The model reads a run of capitals as an initialism and spells it out, so the
+ * KJV small-caps convention — LORD and GOD for the divine name, plus phrases
+ * set in capitals like I AM THAT I AM — was narrated as "L-O-R-D". Single
+ * letters are left alone so "I" and "O" keep working.
+ *
+ * Case-only by construction, so character and word counts are unchanged and
+ * the word timings interpolated from the original text stay aligned with the
+ * audio. Callers pass the displayed text through this on its way to the model
+ * only; the verse on screen keeps its original capitalisation.
+ */
+export function softenAllCaps(text: string): string {
+  return text.replace(/\p{Lu}{2,}(?:'\p{Lu}+)?/gu, (shout) => shout.charAt(0) + shout.slice(1).toLowerCase());
+}
