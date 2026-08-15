@@ -1,5 +1,7 @@
-import React from 'react';
-import { X, Type, Gauge } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Type, Gauge, Download, Check } from 'lucide-react';
+import { TranslationCode } from '../services/bible/types';
+import { downloadTranslation, offlineCoverage } from '../services/pwa/offlineManager';
 
 interface ReaderSettingsProps {
   isOpen: boolean;
@@ -8,6 +10,7 @@ interface ReaderSettingsProps {
   onFontScale: (value: number) => void;
   speed: number;
   onSpeed: (value: number) => void;
+  translation: TranslationCode;
 }
 
 const FONT_STEPS = [0.85, 1, 1.15, 1.3, 1.6];
@@ -19,9 +22,25 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   fontScale,
   onFontScale,
   speed,
-  onSpeed
+  onSpeed,
+  translation
 }) => {
+  const [coverage, setCoverage] = useState<number | null>(null);
+  const [downloading, setDownloading] = useState<{ done: number; total: number } | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void offlineCoverage(translation).then(setCoverage);
+  }, [isOpen, translation]);
+
   if (!isOpen) return null;
+
+  const startDownload = async () => {
+    setDownloading({ done: 0, total: 66 });
+    await downloadTranslation(translation, (p) => setDownloading({ done: p.done, total: p.total }));
+    setDownloading(null);
+    setCoverage(await offlineCoverage(translation));
+  };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -76,6 +95,38 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
               resampling finished audio, so pitch is unaffected. It applies from
               the next sentence because the current one is already synthesized. */}
           <p className="setting-hint">Applies from the next sentence.</p>
+        </fieldset>
+
+        <fieldset className="setting-group">
+          <legend className="setting-label">
+            <Download size={14} aria-hidden="true" />
+            <span>Offline reading</span>
+          </legend>
+
+          {downloading ? (
+            <>
+              <progress className="setting-progress" value={downloading.done} max={downloading.total} />
+              <p className="setting-hint">
+                Downloading {translation}… {downloading.done} of {downloading.total} books
+              </p>
+            </>
+          ) : coverage !== null && coverage >= 1 ? (
+            <p className="setting-hint setting-hint--done">
+              <Check size={14} aria-hidden="true" /> {translation} is available offline.
+            </p>
+          ) : (
+            <>
+              <button type="button" className="btn btn-secondary" onClick={startDownload}>
+                <Download size={14} aria-hidden="true" />
+                <span>Download {translation} for offline</span>
+              </button>
+              <p className="setting-hint">
+                {coverage === null
+                  ? 'Chapters are saved as you read them.'
+                  : `About ${Math.round(coverage * 100)}% saved from reading so far. Roughly 5 MB in total.`}
+              </p>
+            </>
+          )}
         </fieldset>
       </div>
     </div>

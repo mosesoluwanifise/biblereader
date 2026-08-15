@@ -14,11 +14,12 @@ import {
   BIBLE_BOOKS
 } from './services/bible/bibleService';
 import { playbackController, PlaybackState } from './services/audio/playbackController';
+import { loadReadingState, saveReadingState } from './services/readingPosition';
 import {
-  loadReadingState,
-  saveReadingState,
-  DEFAULT_READING_STATE
-} from './services/readingPosition';
+  attachMediaSession,
+  updateMediaMetadata,
+  updatePlaybackState
+} from './services/pwa/mediaSession';
 
 /**
  * Chapter state carries the passage it belongs to.
@@ -185,6 +186,42 @@ export const App: React.FC = () => {
     setCurrentVoice(voice);
   };
 
+  /**
+   * R24: lock-screen and headphone controls.
+   *
+   * Registered once with stable callbacks that read current state via refs
+   * would be one option; re-registering when the transport changes is simpler
+   * and cheap, since setActionHandler just replaces the previous handler.
+   */
+  useEffect(() => {
+    const detach = attachMediaSession({
+      onPlay: () => {
+        if (playbackState === 'paused') void playbackController.resume();
+        else beginPlayback();
+      },
+      onPause: () => void playbackController.pause(),
+      onStop: () => stopForNavigation(),
+      onNext: () => {
+        const next = getNextChapter(book, chapter);
+        if (!next) return;
+        stopForNavigation();
+        setBook(next.book);
+        setChapter(next.chapter);
+      }
+    });
+    return detach;
+  }, [playbackState, beginPlayback, book, chapter]);
+
+  useEffect(() => {
+    updateMediaMetadata(book, chapter, translation, currentVoice.name);
+  }, [book, chapter, translation, currentVoice.name]);
+
+  useEffect(() => {
+    updatePlaybackState(
+      playbackState === 'playing' ? 'playing' : playbackState === 'paused' ? 'paused' : 'none'
+    );
+  }, [playbackState]);
+
   // R18: persist the passage and preferences so the next launch resumes here.
   useEffect(() => {
     saveReadingState({ translation, book, chapter, fontScale, speed });
@@ -242,6 +279,7 @@ export const App: React.FC = () => {
         fontScale={fontScale}
         onFontScale={setFontScale}
         speed={speed}
+        translation={translation}
         onSpeed={(next) => {
           // Applies from the next sentence; the current one is already made.
           setSpeed(next);
