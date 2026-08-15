@@ -5,7 +5,7 @@ import { AudioControls } from './components/AudioControls';
 import { VoiceSelector } from './components/VoiceSelector';
 import { ReaderSettings } from './components/ReaderSettings';
 import { ChapterResult, TranslationCode, Verse } from './services/bible/types';
-import { EngineTier, VoiceOption } from './services/tts/types';
+import { VoiceOption } from './services/tts/types';
 import { PRESET_VOICES } from './services/tts/supertonicEngine';
 import {
   getNextChapter,
@@ -57,7 +57,6 @@ export const App: React.FC = () => {
   const [chapterState, setChapterState] = useState<ChapterState>({ status: 'loading', key: passageKey });
   const [reloadToken, setReloadToken] = useState(0);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
-  const [engineTier, setEngineTier] = useState<EngineTier | null>(null);
   const [modelProgress, setModelProgress] = useState<number | null>(null);
   const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState(false);
@@ -120,7 +119,6 @@ export const App: React.FC = () => {
         {
           onWord: setActiveWordIndex,
           onStateChange: setPlaybackState,
-          onTier: setEngineTier,
           onModelProgress: setModelProgress,
           onError: (message) => {
             setEngineError(message);
@@ -264,7 +262,6 @@ export const App: React.FC = () => {
         passageTitle={`${book} ${chapter} (${translation})`}
         voice={currentVoice}
         playbackState={playbackState}
-        engineTier={engineTier}
         modelProgress={modelProgress}
         errorMessage={engineError}
         disabled={!currentVerses}

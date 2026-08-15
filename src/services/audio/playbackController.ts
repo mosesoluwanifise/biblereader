@@ -1,8 +1,6 @@
 import { supertonicEngine, EngineCancelled } from '../tts/supertonicEngine';
 import { splitSentences } from '../tts/wordTiming';
-import { EngineTier, WordTimestamp } from '../tts/types';
-import { findVoice } from '../tts/voices';
-import { estimateDuration, isWebSpeechAvailable, speakWithWebSpeech, SpokenHandle } from '../tts/webSpeechFallback';
+import { WordTimestamp } from '../tts/types';
 
 /**
  * Owns audio playback for a passage.
@@ -18,9 +16,9 @@ import { estimateDuration, isWebSpeechAvailable, speakWithWebSpeech, SpokenHandl
  *  - Stopping abandoned in-flight inference without cancelling it, so the
  *    worker kept running chains nobody awaited. Stop now cancels by generation.
  *
- * Narration starts on the Web Speech tier while the ~383 MB Supertonic bundle
- * downloads, then upgrades. Synthesis is slower than realtime on WASM, so
- * sentences are produced one ahead of playback.
+ * Play waits for the Supertonic engine to finish loading before speaking —
+ * no platform voice plays in the meantime. Synthesis is slower than realtime
+ * on WASM, so sentences are produced one ahead of playback.
  */
 
 export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused';
@@ -28,7 +26,6 @@ export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused';
 export interface PlaybackCallbacks {
   onWord?: (globalWordIndex: number) => void;
   onStateChange?: (state: PlaybackState) => void;
-  onTier?: (tier: EngineTier) => void;
   onModelProgress?: (fraction: number | null) => void;
   onSentence?: (index: number, total: number) => void;
   onEnd?: () => void;
@@ -54,7 +51,6 @@ export class PlaybackController {
   private speed: number | undefined;
   private cursor = 0;
   private prefetch: Promise<Chunk | null> | null = null;
-  private spoken: SpokenHandle | null = null;
 
   private rafId: number | null = null;
   private generation = 0;
@@ -163,30 +159,18 @@ export class PlaybackController {
 
   private async run(generation: number): Promise<void> {
     try {
-      // R22 / KTD6: speak now on the platform voice rather than leaving the
-      // reader in silence for the length of a 383 MB download.
+      // Stay in 'preparing' — no platform voice — until the real engine is
+      // ready. A ~383 MB first download means this can take a while, but
+      // speaking on a system voice first was more confusing than silence: it
+      // read as the finished product on a slower connection.
       if (!supertonicEngine.isReady()) {
-        void supertonicEngine
-          .load((p) => {
-            if (generation === this.generation) this.callbacks.onModelProgress?.(p.loaded / p.total);
-          })
-          .then(() => {
-            if (generation === this.generation) this.callbacks.onModelProgress?.(null);
-          })
-          .catch(() => {
-            if (generation === this.generation) this.callbacks.onModelProgress?.(null);
-          });
-
-        if (isWebSpeechAvailable()) {
-          await this.runInterim(generation);
-          return;
-        }
-        // No interim tier available: wait for the real engine.
-        await supertonicEngine.load();
+        await supertonicEngine.load((p) => {
+          if (generation === this.generation) this.callbacks.onModelProgress?.(p.loaded / p.total);
+        });
+        if (generation === this.generation) this.callbacks.onModelProgress?.(null);
       }
 
       if (generation !== this.generation) return;
-      this.callbacks.onTier?.('supertonic');
 
       const context = this.ensureContext();
       this.nextStartAt = context.currentTime;
@@ -221,47 +205,6 @@ export class PlaybackController {
       this.setState('idle');
       this.callbacks.onError?.((err as Error)?.message ?? 'Playback failed');
     }
-  }
-
-  /**
-   * Interim narration. Highlighting is verse-coarse and timing is estimated;
-   * the UI labels the tier rather than implying parity with Supertonic.
-   */
-  private async runInterim(generation: number): Promise<void> {
-    this.callbacks.onTier?.('web-speech');
-    const voice = findVoice(this.voiceId);
-
-    while (this.cursor < this.sentences.length) {
-      if (generation !== this.generation) return;
-
-      // Upgrade at the next sentence boundary once the real engine is ready.
-      if (supertonicEngine.isReady()) {
-        this.callbacks.onTier?.('supertonic');
-        return this.run(generation);
-      }
-
-      const sentence = this.sentences[this.cursor];
-      const offset = this.wordOffsets[this.cursor];
-      this.setState('playing');
-      this.callbacks.onSentence?.(this.cursor, this.sentences.length);
-
-      const { done, handle } = speakWithWebSpeech(
-        sentence,
-        voice,
-        (wordIndex) => {
-          if (generation === this.generation) this.callbacks.onWord?.(offset + wordIndex);
-        },
-        estimateDuration(sentence)
-      );
-      this.spoken = handle;
-      await done;
-      this.spoken = null;
-
-      if (generation !== this.generation) return;
-      this.cursor += 1;
-    }
-
-    this.finish(generation);
   }
 
   private finish(generation: number): void {
@@ -381,9 +324,6 @@ export class PlaybackController {
     // Tell the worker to abandon queued and in-flight chains. Dropping the
     // promise reference alone left them running on shared sessions.
     supertonicEngine.cancelInFlight();
-
-    this.spoken?.cancel();
-    this.spoken = null;
 
     // Everything queued ahead on the audio clock must be cancelled too, or
     // sentences scheduled into the future keep playing after stop.

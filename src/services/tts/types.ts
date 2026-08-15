@@ -4,9 +4,6 @@ export interface WordTimestamp {
   end: number; // seconds
 }
 
-/** Which engine tier produced a given playback session. */
-export type EngineTier = 'supertonic' | 'web-speech';
-
 export interface SynthesisResult {
   audio: Float32Array;
   sampleRate: number;

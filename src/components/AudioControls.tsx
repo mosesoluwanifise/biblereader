@@ -1,13 +1,12 @@
 import React from 'react';
 import { Play, Pause, RotateCcw, Cpu, Loader2, AlertCircle } from 'lucide-react';
-import { EngineTier, VoiceOption } from '../services/tts/types';
+import { VoiceOption } from '../services/tts/types';
 import { PlaybackState } from '../services/audio/playbackController';
 
 interface AudioControlsProps {
   passageTitle: string;
   voice: VoiceOption;
   playbackState: PlaybackState;
-  engineTier: EngineTier | null;
   /** 0..1 while the Supertonic bundle downloads, null otherwise. */
   modelProgress: number | null;
   errorMessage: string | null;
@@ -21,7 +20,6 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   passageTitle,
   voice,
   playbackState,
-  engineTier,
   modelProgress,
   errorMessage,
   disabled,
@@ -31,7 +29,6 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
 }) => {
   const isPlaying = playbackState === 'playing';
   const isBusy = playbackState === 'preparing';
-  const isInterim = engineTier === 'web-speech';
 
   const label = errorMessage
     ? errorMessage
@@ -51,18 +48,13 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
           <span className="player-meta">
             <button type="button" className="player-voice-tag" onClick={onOpenVoiceSelector}>
               <Cpu size={12} aria-hidden="true" />
-              <span>{isInterim ? 'System voice' : voice.name}</span>
+              <span>{voice.name}</span>
             </button>
 
-            {/* R22: the interim tier is labelled, not passed off as the real
-                engine — its highlighting is coarser and its timing estimated. */}
-            {isInterim && modelProgress !== null && (
+            {modelProgress !== null && (
               <span className="player-upgrade" role="status">
-                Downloading full voice… {Math.round(modelProgress * 100)}%
+                Downloading voice… {Math.round(modelProgress * 100)}%
               </span>
-            )}
-            {isInterim && modelProgress === null && (
-              <span className="player-upgrade">Temporary voice</span>
             )}
           </span>
         </div>
