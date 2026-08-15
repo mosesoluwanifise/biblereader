@@ -168,7 +168,8 @@ export class SupertonicEngine {
     text: string,
     voiceId: string = DEFAULT_VOICE_ID,
     steps: number = DEFAULT_STEPS,
-    generation: number = this.generation
+    generation: number = this.generation,
+    speed?: number
   ): Promise<SynthesisResult> {
     const trimmed = text.trim();
     if (trimmed.length === 0) {
@@ -181,7 +182,8 @@ export class SupertonicEngine {
       text: trimmed,
       voiceId,
       steps,
-      generation
+      generation,
+      speed
     });
 
     const audio = new Float32Array(result.audio);

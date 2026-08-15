@@ -18,8 +18,8 @@ const HOP = 512; // ae.base_chunk_size
 const LATENT_DIM = 24; // ae.ldim
 const COMPRESS = 6; // ttl.chunk_compress_factor
 
-/** Reference pipeline's default. Slightly faster than the raw prediction. */
-const SPEED = 1.05;
+/** Reference pipeline's default, used when a request does not set one. */
+const DEFAULT_SPEED = 1.05;
 
 /**
  * Supertonic-3 is multilingual and conditions on a language tag wrapping the
@@ -47,7 +47,16 @@ let modelBase = '/models/supertonic-3';
 
 export type WorkerRequest =
   | { id: number; type: 'load'; modelBase: string }
-  | { id: number; type: 'synthesize'; text: string; voiceId: string; steps: number; generation: number }
+  | {
+      id: number;
+      type: 'synthesize';
+      text: string;
+      voiceId: string;
+      steps: number;
+      generation: number;
+      /** Divides the predicted duration: higher is faster speech. */
+      speed?: number;
+    }
   | { id: number; type: 'cancel'; generation: number };
 
 export type WorkerResponse =
@@ -176,7 +185,8 @@ async function synthesize(
   text: string,
   voiceId: string,
   steps: number,
-  generation: number
+  generation: number,
+  speed: number = DEFAULT_SPEED
 ): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
   assertLive(generation);
@@ -199,7 +209,9 @@ async function synthesize(
     style_dp: style.dp,
     text_mask: textMask
   });
-  const predicted = Number((durationOut.duration.data as Float32Array)[0]) / SPEED;
+  // Speed shortens the window the model fills rather than resampling the
+  // result, so the voice does not change pitch.
+  const predicted = Number((durationOut.duration.data as Float32Array)[0]) / speed;
 
   const targetSamples = Math.max(1, Math.round(predicted * SAMPLE_RATE));
   // The latent grid is quantised to HOP * COMPRESS samples, so the vocoder
@@ -316,7 +328,14 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       if (request.type === 'load') {
         await load(request.id, request.modelBase);
       } else {
-        await synthesize(request.id, request.text, request.voiceId, request.steps, request.generation);
+        await synthesize(
+          request.id,
+          request.text,
+          request.voiceId,
+          request.steps,
+          request.generation,
+          request.speed
+        );
       }
     } catch (err) {
       if (err instanceof Cancelled) {

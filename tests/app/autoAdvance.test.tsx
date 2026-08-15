@@ -70,6 +70,9 @@ async function waitForPassage(fragment: string): Promise<void> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // App now restores the saved passage on mount, so a position left behind by
+  // a previous test would decide where this one starts.
+  localStorage.clear();
   loadChapter.mockImplementation(async (book: string, chapter: number) => ({
     ok: true,
     verses: versesFor(book, chapter)

@@ -51,6 +51,7 @@ export class PlaybackController {
   private sentences: string[] = [];
   private wordOffsets: number[] = [];
   private voiceId = '';
+  private speed: number | undefined;
   private cursor = 0;
   private prefetch: Promise<Chunk | null> | null = null;
   private spoken: SpokenHandle | null = null;
@@ -92,13 +93,20 @@ export class PlaybackController {
    * Must be called directly inside a user gesture — it creates and resumes the
    * AudioContext before awaiting anything, which is what iOS requires.
    */
-  start(text: string, voiceId: string, callbacks: PlaybackCallbacks = {}, startWordOffset = 0): void {
+  start(
+    text: string,
+    voiceId: string,
+    callbacks: PlaybackCallbacks = {},
+    startWordOffset = 0,
+    speed?: number
+  ): void {
     this.stop();
     this.generation += 1;
     const generation = this.generation;
 
     this.callbacks = callbacks;
     this.voiceId = voiceId;
+    this.speed = speed;
 
     // Synchronous, pre-await: keeps the gesture chain intact.
     const context = this.ensureContext();
@@ -128,7 +136,13 @@ export class PlaybackController {
   private async synthesize(index: number, generation: number): Promise<Chunk | null> {
     if (index >= this.sentences.length) return null;
     const context = this.ensureContext();
-    const result = await supertonicEngine.synthesizeSentence(this.sentences[index], this.voiceId);
+    const result = await supertonicEngine.synthesizeSentence(
+      this.sentences[index],
+      this.voiceId,
+      undefined,
+      undefined,
+      this.speed
+    );
     if (generation !== this.generation) return null;
     if (result.audio.length === 0) return null;
 

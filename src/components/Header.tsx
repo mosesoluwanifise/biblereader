@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Sparkles } from 'lucide-react';
+import { BookOpen, Sparkles, Settings } from 'lucide-react';
 import { TranslationCode } from '../services/bible/types';
 import { VoiceOption } from '../services/tts/types';
 
@@ -8,13 +8,15 @@ interface HeaderProps {
   onSelectTranslation: (t: TranslationCode) => void;
   currentVoice: VoiceOption;
   onOpenVoiceSelector: () => void;
+  onOpenSettings: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentTranslation,
   onSelectTranslation,
   currentVoice,
-  onOpenVoiceSelector
+  onOpenVoiceSelector,
+  onOpenSettings
 }) => {
   return (
     <header className="app-header">
@@ -39,6 +41,15 @@ export const Header: React.FC<HeaderProps> = ({
         <button className="select-badge" onClick={onOpenVoiceSelector} title="Change voice">
           <Sparkles size={16} className="text-gold" />
           <span>{currentVoice.name}</span>
+        </button>
+
+        <button
+          className="select-badge"
+          onClick={onOpenSettings}
+          aria-label="Reading settings"
+          title="Text size and narration speed"
+        >
+          <Settings size={16} />
         </button>
       </div>
     </header>

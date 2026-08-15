@@ -3,11 +3,22 @@ import { Header } from './components/Header';
 import { BibleView } from './components/BibleView';
 import { AudioControls } from './components/AudioControls';
 import { VoiceSelector } from './components/VoiceSelector';
+import { ReaderSettings } from './components/ReaderSettings';
 import { ChapterResult, TranslationCode, Verse } from './services/bible/types';
 import { EngineTier, VoiceOption } from './services/tts/types';
 import { PRESET_VOICES } from './services/tts/supertonicEngine';
-import { getNextChapter, loadChapter, computeVerseOffsets } from './services/bible/bibleService';
+import {
+  getNextChapter,
+  loadChapter,
+  computeVerseOffsets,
+  BIBLE_BOOKS
+} from './services/bible/bibleService';
 import { playbackController, PlaybackState } from './services/audio/playbackController';
+import {
+  loadReadingState,
+  saveReadingState,
+  DEFAULT_READING_STATE
+} from './services/readingPosition';
 
 /**
  * Chapter state carries the passage it belongs to.
@@ -26,9 +37,18 @@ type ChapterState =
 const passageKeyOf = (t: TranslationCode, b: string, c: number) => `${t}|${b}|${c}`;
 
 export const App: React.FC = () => {
-  const [translation, setTranslation] = useState<TranslationCode>('KJV');
-  const [book, setBook] = useState<string>('Genesis');
-  const [chapter, setChapter] = useState<number>(1);
+  /**
+   * Read once, synchronously, before the first render. Loading it in an effect
+   * would paint Genesis 1 and then jump to the saved passage.
+   */
+  const [initial] = useState(() => loadReadingState(BIBLE_BOOKS.map((b) => b.name)));
+
+  const [translation, setTranslation] = useState<TranslationCode>(initial.translation);
+  const [book, setBook] = useState<string>(initial.book);
+  const [chapter, setChapter] = useState<number>(initial.chapter);
+  const [fontScale, setFontScale] = useState<number>(initial.fontScale);
+  const [speed, setSpeed] = useState<number>(initial.speed);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [currentVoice, setCurrentVoice] = useState<VoiceOption>(PRESET_VOICES[0]);
 
   const passageKey = passageKeyOf(translation, book, chapter);
@@ -116,10 +136,11 @@ export const App: React.FC = () => {
             setChapter(next.chapter);
           }
         },
-        startWordOffset
+        startWordOffset,
+        speed
       );
     },
-    [currentVerses, currentVoice.id, book, chapter]
+    [currentVerses, currentVoice.id, book, chapter, speed]
   );
 
   // Resumes playback after auto-advance, once the next chapter's text is in.
@@ -164,18 +185,24 @@ export const App: React.FC = () => {
     setCurrentVoice(voice);
   };
 
+  // R18: persist the passage and preferences so the next launch resumes here.
+  useEffect(() => {
+    saveReadingState({ translation, book, chapter, fontScale, speed });
+  }, [translation, book, chapter, fontScale, speed]);
+
   useEffect(() => () => playbackController.stop(), []);
 
   const viewState: ChapterState =
     chapterState.key === passageKey ? chapterState : { status: 'loading', key: passageKey };
 
   return (
-    <div className="app-container">
+    <div className="app-container" style={{ ['--verse-scale' as string]: String(fontScale) }}>
       <Header
         currentTranslation={translation}
         onSelectTranslation={handleSelectTranslation}
         currentVoice={currentVoice}
         onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
       <BibleView
@@ -207,6 +234,18 @@ export const App: React.FC = () => {
         onTogglePlay={handleTogglePlay}
         onRestart={handleRestart}
         onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}
+      />
+
+      <ReaderSettings
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        fontScale={fontScale}
+        onFontScale={setFontScale}
+        speed={speed}
+        onSpeed={(next) => {
+          // Applies from the next sentence; the current one is already made.
+          setSpeed(next);
+        }}
       />
 
       <VoiceSelector

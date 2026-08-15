@@ -428,3 +428,72 @@ body {
 
 a.player-disclosure { text-decoration: none; }
 a.player-disclosure:hover { border-color: var(--accent-gold); color: var(--accent-gold); }
+
+/* Reader settings ------------------------------------------------------- */
+.verses-list {
+  font-size: calc(1.15rem * var(--verse-scale, 1));
+}
+
+.verse-item--active {
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.verse-item:focus-visible {
+  outline: 2px solid var(--accent-gold);
+  outline-offset: 2px;
+}
+
+.setting-group {
+  border: none;
+  padding: 0;
+  margin: 0 0 1.5rem 0;
+}
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-gold);
+  margin-bottom: 0.6rem;
+  padding: 0;
+}
+
+.setting-options {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.setting-option {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.9rem;
+  min-width: 3rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.setting-option:hover { border-color: var(--text-secondary); }
+
+.setting-option--on {
+  background: linear-gradient(135deg, var(--accent-gold), #d97706);
+  border-color: transparent;
+  color: #0d1117;
+  font-weight: 700;
+}
+
+.setting-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .word-span, .verse-item, .setting-option { transition: none; }
+  .word-span.highlighted { transform: none; }
+}
