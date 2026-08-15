@@ -84,11 +84,17 @@ async function uploadFile(bucket, entry) {
 async function main() {
   const bucket = parseBucketArg(process.argv.slice(2));
 
-  const manifest = JSON.parse(await readFile(join(BUNDLE_DIR, 'manifest.json'), 'utf8'));
-  const files = manifest.files ?? [];
-  if (files.length === 0) {
+  const manifestPath = join(BUNDLE_DIR, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const listed = manifest.files ?? [];
+  if (listed.length === 0) {
     throw new Error('manifest.json lists no files. Run npm run build:models first.');
   }
+
+  // manifest.json describes the bundle but, being self-referential, doesn't
+  // list itself among `files` — yet synthesis.worker.ts fetches it first and
+  // unconditionally to learn the graph/voice list, so it has to ship too.
+  const files = [{ path: 'manifest.json', bytes: (await stat(manifestPath)).size }, ...listed];
 
   const totalBytes = files.reduce((sum, f) => sum + f.bytes, 0);
   console.log(
