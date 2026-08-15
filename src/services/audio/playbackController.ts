@@ -14,6 +14,9 @@ import type {
 import { MediaElementSink } from './mediaElementSink';
 
 export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'rebuffering' | 'device-too-slow';
+export type PlaybackModelPhase = 'provider-fallback';
+export const PREFETCH_LOW_WATER_SECONDS = 8;
+export const PREFETCH_HIGH_WATER_SECONDS = 12;
 
 export type PassageIdentityInput = Omit<
   PassageSynthesisIdentity,
@@ -25,7 +28,7 @@ export interface PlaybackCallbacks {
   onWord?: (globalWordIndex: number) => void;
   onStateChange?: (state: PlaybackState) => void;
   onModelProgress?: (fraction: number | null) => void;
-  onModelPhase?: (label: string | null) => void;
+  onModelPhase?: (phase: PlaybackModelPhase | null) => void;
   onBufferChange?: (scheduledAheadSeconds: number) => void;
   onSentence?: (index: number, total: number) => void;
   onEnd?: () => void;
@@ -35,9 +38,14 @@ export interface PlaybackCallbacks {
 interface ScheduledChunk {
   prepared: PreparedSynthesisChunk;
   buffer: AudioBuffer;
+  words: ScheduledWord[];
   startAt: number;
   endAt: number;
   source: AudioBufferSourceNode;
+}
+
+interface ScheduledWord extends WordTimestamp {
+  globalIndex: number;
 }
 
 interface CoordinatorPort {
@@ -136,7 +144,6 @@ export class PlaybackController {
     const generation = this.generation;
     this.callbacks = callbacks;
     this.activeRequestKey = requestKey;
-    this.resetMetrics();
 
     const context = this.ensureContext();
     void context.resume();
@@ -173,7 +180,7 @@ export class PlaybackController {
         await supertonicEngine.load((progress) => {
           if (generation === this.generation) {
             this.callbacks.onModelProgress?.(progress.loaded / progress.total);
-            this.callbacks.onModelPhase?.(progress.label);
+            this.callbacks.onModelPhase?.(progress.label === 'provider-fallback' ? 'provider-fallback' : null);
           }
         });
         if (generation === this.generation) {
@@ -292,8 +299,13 @@ export class PlaybackController {
       }
     }
 
-    const samples = new Float32Array(prepared.audio.length);
-    samples.set(prepared.audio);
+    let samples: Float32Array<ArrayBuffer>;
+    if (prepared.audio.buffer instanceof ArrayBuffer) {
+      samples = prepared.audio as Float32Array<ArrayBuffer>;
+    } else {
+      samples = new Float32Array(prepared.audio.length);
+      samples.set(prepared.audio);
+    }
     const buffer = context.createBuffer(1, samples.length, prepared.sampleRate);
     buffer.copyToChannel(samples, 0);
 
@@ -303,7 +315,7 @@ export class PlaybackController {
     source.connect(this.ensureSink().node);
     source.start(startAt);
     const endAt = startAt + buffer.duration;
-    this.scheduled.push({ prepared, buffer, startAt, endAt, source });
+    this.scheduled.push({ prepared, buffer, words: scheduledWords(prepared), startAt, endAt, source });
     this.nextStartAt = endAt;
     if (generation === this.generation) this.observeLowWater();
   }
@@ -360,14 +372,18 @@ export class PlaybackController {
 
       const active = this.scheduled.find((entry) => now >= entry.startAt && now < entry.endAt);
       if (active) {
-        const globalWord = activeGlobalWord(active, now - active.startAt);
+        const globalWord = activeGlobalWord(active.words, now - active.startAt);
         if (globalWord !== null && globalWord !== lastWord) {
           lastWord = globalWord;
           this.callbacks.onWord?.(globalWord);
         }
       }
       if (this.scheduled.length > 4) {
-        this.scheduled = this.scheduled.filter((entry) => entry.endAt > now - 1);
+        this.scheduled = this.scheduled.filter((entry) => {
+          if (entry.endAt > now - 1) return true;
+          entry.source.disconnect();
+          return false;
+        });
       }
       this.rafId = requestAnimationFrame(tick);
     };
@@ -393,7 +409,7 @@ export class PlaybackController {
   }
 
   private notifyBuffer(ahead: number): void {
-    const band = ahead <= 8 ? 'low' : ahead > 12 ? 'high' : 'middle';
+    const band = ahead <= PREFETCH_LOW_WATER_SECONDS ? 'low' : ahead > PREFETCH_HIGH_WATER_SECONDS ? 'high' : 'middle';
     if (band === this.bufferBand) return;
     this.bufferBand = band;
     this.callbacks.onBufferChange?.(ahead);
@@ -432,6 +448,7 @@ export class PlaybackController {
     if (generation !== this.generation) return;
     for (const entry of this.scheduled) this.reportAudibleSegments(entry, entry.buffer.duration);
     this.stopWordClock();
+    this.releaseScheduledSources(false);
     this.activeRequestKey = null;
     this.setState('idle');
     this.callbacks.onWord?.(-1);
@@ -451,11 +468,17 @@ export class PlaybackController {
   }
 
   private stopSources(): void {
+    this.releaseScheduledSources(true);
+  }
+
+  private releaseScheduledSources(stop: boolean): void {
     for (const entry of this.scheduled) {
-      try {
-        entry.source.stop();
-      } catch {
-        // Source may already have ended.
+      if (stop) {
+        try {
+          entry.source.stop();
+        } catch {
+          // Source may already have ended.
+        }
       }
       entry.source.disconnect();
     }
@@ -480,20 +503,22 @@ export class PlaybackController {
   }
 }
 
-function activeGlobalWord(entry: ScheduledChunk, elapsed: number): number | null {
+function scheduledWords(prepared: PreparedSynthesisChunk): ScheduledWord[] {
+  const scheduled: ScheduledWord[] = [];
   let wordCursor = 0;
-  for (const segment of entry.prepared.chunk.segments) {
-    const segmentWords = entry.prepared.words.slice(wordCursor, wordCursor + segment.wordCount);
-    const local = activeWordIndex(segmentWords, elapsed);
-    if (local !== null) return segment.wordOffset + local;
+  for (const segment of prepared.chunk.segments) {
+    for (let localIndex = 0; localIndex < segment.wordCount; localIndex += 1) {
+      const word = prepared.words[wordCursor + localIndex];
+      if (word) scheduled.push({ ...word, globalIndex: segment.wordOffset + localIndex });
+    }
     wordCursor += segment.wordCount;
   }
-  return null;
+  return scheduled;
 }
 
-function activeWordIndex(words: WordTimestamp[], elapsed: number): number | null {
-  for (let index = 0; index < words.length; index += 1) {
-    if (elapsed >= words[index].start && elapsed < words[index].end) return index;
+function activeGlobalWord(words: ScheduledWord[], elapsed: number): number | null {
+  for (const word of words) {
+    if (elapsed >= word.start && elapsed < word.end) return word.globalIndex;
   }
   return null;
 }

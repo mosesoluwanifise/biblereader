@@ -34,7 +34,9 @@ vi.mock('../../src/services/bible/bibleService', async (importOriginal) => {
 
 vi.mock('../../src/services/audio/playbackController', () => ({
   playbackController: controller,
-  PlaybackController: class {}
+  PlaybackController: class {},
+  PREFETCH_LOW_WATER_SECONDS: 8,
+  PREFETCH_HIGH_WATER_SECONDS: 12
 }));
 
 import { App } from '../../src/App';

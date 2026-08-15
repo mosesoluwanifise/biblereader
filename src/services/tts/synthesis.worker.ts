@@ -207,9 +207,6 @@ async function load(id: number, base: string, preferredProfile?: RuntimeProfile 
   const step = (label: string, bytes: number) =>
     post({ id, type: 'progress', loaded: (loaded += bytes), total, label });
 
-  indexer = await fetch(`${modelBase}/onnx/unicode_indexer.json`).then((r) => r.json());
-  step('tokenizer', sizeOf('onnx/unicode_indexer.json', 3e5));
-
   const capabilities = getRuntimeCapabilities(globalThis);
   const compatible = compatibleProfile(preferredProfile, capabilities);
   // The worker is the first code to know the fetched model version. Never use
@@ -230,37 +227,53 @@ async function load(id: number, base: string, preferredProfile?: RuntimeProfile 
    */
   await releaseSessions();
   sessions.clear();
+  styles.clear();
   backend = null;
-  const compileStarted = performance.now();
-  const selected = await createAtomicSessionSet(
-    GRAPHS,
-    providers,
-    {
-      create: async (graph, provider) => {
-        return ort.InferenceSession.create(`${modelBase}/onnx/${graph}.onnx`, {
-          executionProviders: [provider]
-        });
-      },
-      release: (session) => session.release()
-    },
-    () => post({ id, type: 'progress', loaded, total, label: 'provider-fallback' })
+
+  // Tokenizer and styles are independent of graph compilation. Fetch them
+  // alongside the much larger ONNX sessions so cold initialization pays one
+  // network/compile window rather than three sequential phases.
+  const indexerPromise = fetch(`${modelBase}/onnx/unicode_indexer.json`)
+    .then((response) => response.json())
+    .then((value: number[]) => {
+      step('tokenizer', sizeOf('onnx/unicode_indexer.json', 3e5));
+      return value;
+    });
+  const stylesPromise = Promise.all(
+    voiceIds.map(async (voiceId) => {
+      const style = await fetch(`${modelBase}/voice_styles/${voiceId}.json`).then((response) => response.json());
+      styles.set(voiceId, { ttl: tensorFromStyle(style.style_ttl), dp: tensorFromStyle(style.style_dp) });
+      step(`voice ${voiceId}`, sizeOf(`voice_styles/${voiceId}.json`, 3e5));
+    })
   );
-  const compileMs = performance.now() - compileStarted;
+  const sessionSetPromise = (async () => {
+    const startedAt = performance.now();
+    const selected = await createAtomicSessionSet(
+      GRAPHS,
+      providers,
+      {
+        create: async (graph, provider) => {
+          return ort.InferenceSession.create(`${modelBase}/onnx/${graph}.onnx`, {
+            executionProviders: [provider]
+          });
+        },
+        release: (session) => session.release()
+      },
+      () => post({ id, type: 'progress', loaded, total, label: 'provider-fallback' })
+    );
+    return { selected, compileMs: performance.now() - startedAt };
+  })();
+  const [{ selected, compileMs }, loadedIndexer] = await Promise.all([
+    sessionSetPromise,
+    indexerPromise,
+    stylesPromise
+  ]);
+  indexer = loadedIndexer;
   backend = selected.provider;
   for (const graph of GRAPHS) {
     sessions.set(graph, selected.sessions.get(graph)!);
     step(graph, sizeOf(`onnx/${graph}.onnx`, 1e7));
   }
-
-  // Ten styles at ~292 KB each: trivial bytes, but ten serial round trips is a
-  // second of pure latency on a slow link for no reason.
-  await Promise.all(
-    voiceIds.map(async (voiceId) => {
-      const style = await fetch(`${modelBase}/voice_styles/${voiceId}.json`).then((r) => r.json());
-      styles.set(voiceId, { ttl: tensorFromStyle(style.style_ttl), dp: tensorFromStyle(style.style_dp) });
-      step(`voice ${voiceId}`, sizeOf(`voice_styles/${voiceId}.json`, 3e5));
-    })
-  );
 
   /**
    * Run the chain once and throw the audio away.
@@ -308,19 +321,7 @@ async function synthesize(
 ): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
   if (cancellable) assertLive(generation);
-  const style = styles.get(voiceId) ?? styles.values().next().value;
-  if (!style) throw new Error(`Unknown voice: ${voiceId}`);
-
-  // Tag affects synthesis only; word timings are derived from the untagged
-  // text by the caller, so the tag must not leak into the word list.
-  const ids = [...tagText(softenAllCaps(text))].map((ch) => {
-    const cp = ch.codePointAt(0) ?? 0;
-    return cp < indexer!.length ? indexer![cp] : 0;
-  });
-  const n = ids.length;
-
-  const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map((v) => BigInt(v))), [1, n]);
-  const textMask = new ort.Tensor('float32', new Float32Array(n).fill(1), [1, 1, n]);
+  const { style, textIds, textMask } = prepareTextInputs(text, voiceId);
 
   const predicted = await runDurationPredictor(textIds, textMask, style, speed);
 
@@ -441,6 +442,24 @@ async function runDurationPredictor(
   return Number((durationOut.duration.data as Float32Array)[0]) / speed;
 }
 
+function prepareTextInputs(
+  text: string,
+  voiceId: string
+): { style: StyleTensors; textIds: ort.Tensor; textMask: ort.Tensor } {
+  if (!indexer) throw new Error('Engine not loaded');
+  const style = styles.get(voiceId) ?? styles.values().next().value;
+  if (!style) throw new Error(`Unknown voice: ${voiceId}`);
+
+  // The synthesis tag must never leak into the caller's displayed word list.
+  const ids = [...tagText(softenAllCaps(text))].map((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < indexer!.length ? indexer![codePoint] : 0;
+  });
+  const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map((value) => BigInt(value))), [1, ids.length]);
+  const textMask = new ort.Tensor('float32', new Float32Array(ids.length).fill(1), [1, 1, ids.length]);
+  return { style, textIds, textMask };
+}
+
 async function predictDuration(
   id: number,
   text: string,
@@ -450,14 +469,7 @@ async function predictDuration(
 ): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
   assertLive(generation);
-  const style = styles.get(voiceId) ?? styles.values().next().value;
-  if (!style) throw new Error(`Unknown voice: ${voiceId}`);
-  const ids = [...tagText(softenAllCaps(text))].map((ch) => {
-    const cp = ch.codePointAt(0) ?? 0;
-    return cp < indexer!.length ? indexer![cp] : 0;
-  });
-  const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map((value) => BigInt(value))), [1, ids.length]);
-  const textMask = new ort.Tensor('float32', new Float32Array(ids.length).fill(1), [1, 1, ids.length]);
+  const { style, textIds, textMask } = prepareTextInputs(text, voiceId);
   const predicted = await runDurationPredictor(textIds, textMask, style, speed);
   assertLive(generation);
   post({ id, type: 'duration', predicted });

@@ -1,6 +1,9 @@
 import booksCatalog from '../../data/books.json';
 import { BookData, BookEntry, ChapterResult, TranslationCode, Verse } from './types';
 import { readCachedBook, writeCachedBook, reconcileDataVersion } from './bibleCache';
+import { countWords } from '../text';
+
+export { countWords } from '../text';
 
 export const BIBLE_BOOKS = booksCatalog as BookEntry[];
 
@@ -175,12 +178,6 @@ export function splitIntoWords(text: string): { word: string; cleanWord: string 
     .split(/(\s+)/)
     .filter((token) => token.trim().length > 0)
     .map((token) => ({ word: token, cleanWord: token.replace(/[^\w]/g, '').toLowerCase() }));
-}
-
-/** Word count used to align highlight indices across verses. */
-export function countWords(text: string): number {
-  const trimmed = text.trim();
-  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
 }
 
 /** Cumulative word offset of each verse within a chapter. */

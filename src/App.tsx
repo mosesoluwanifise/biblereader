@@ -18,6 +18,9 @@ import {
 import {
   playbackController,
   PlaybackState,
+  type PlaybackModelPhase,
+  PREFETCH_HIGH_WATER_SECONDS,
+  PREFETCH_LOW_WATER_SECONDS,
   type PassageIdentityInput
 } from './services/audio/playbackController';
 import { loadReadingState, saveReadingState } from './services/readingPosition';
@@ -67,7 +70,7 @@ export const App: React.FC = () => {
   const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
-  const [modelPhase, setModelPhase] = useState<string | null>(null);
+  const [modelPhase, setModelPhase] = useState<PlaybackModelPhase | null>(null);
   const [engineReadyEpoch, setEngineReadyEpoch] = useState(0);
 
   /** Set when auto-advance moves the passage, so the effect resumes playback. */
@@ -230,12 +233,12 @@ export const App: React.FC = () => {
           onModelProgress: setModelProgress,
           onModelPhase: setModelPhase,
           onBufferChange: (scheduledAhead) => {
-            if (scheduledAhead <= 8) {
+            if (scheduledAhead <= PREFETCH_LOW_WATER_SECONDS) {
               playbackController.cancelPreparation('speculative');
               nextPrimeKey.current = null;
               return;
             }
-            if (scheduledAhead <= 12 || nextPrimeKey.current) return;
+            if (scheduledAhead <= PREFETCH_HIGH_WATER_SECONDS || nextPrimeKey.current) return;
             const next = getNextChapter(book, chapter);
             if (!next) return;
             const nextKey = passageKeyOf(translation, next.book, next.chapter);
@@ -245,7 +248,7 @@ export const App: React.FC = () => {
                 !result.ok ||
                 playbackPreparationEpoch !== preparationEpoch.current ||
                 currentPassageKey.current !== playbackPassageKey ||
-                playbackController.getScheduledAheadSeconds() <= 12
+                playbackController.getScheduledAheadSeconds() <= PREFETCH_HIGH_WATER_SECONDS
               ) {
                 if (nextPrimeKey.current === nextKey) nextPrimeKey.current = null;
                 return;

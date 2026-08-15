@@ -11,7 +11,7 @@ export interface TtsDiagnostic {
   at: number;
   phase: DiagnosticPhase;
   durationMs?: number;
-  provider?: 'webgpu' | 'wasm';
+  provider?: RuntimeProvider;
   steps?: number;
   modelVersion?: string;
   runtimeVersion?: string;
@@ -132,9 +132,8 @@ export function getTtsDiagnostics(): readonly TtsDiagnostic[] {
 /** Builds the shareable qualification artifact without accepting or exposing passage text. */
 export function getTtsQualificationSnapshot(scope: typeof globalThis = globalThis): TtsQualificationSnapshot {
   const snapshot = getTtsDiagnostics();
-  const hardwareConcurrency = Math.max(1, scope.navigator?.hardwareConcurrency || 1);
-  const crossOriginIsolated = scope.crossOriginIsolated === true;
-  const webgpu = !!scope.navigator && 'gpu' in scope.navigator;
+  const capabilities = getRuntimeCapabilities(scope);
+  const { hardwareConcurrency, crossOriginIsolated, webgpu } = capabilities;
   const browser = browserIdentity(scope.navigator?.userAgent ?? '');
   const runtime = [...snapshot].reverse().find((event) => event.provider || event.steps !== undefined);
   return {
@@ -225,3 +224,4 @@ function percentile(sorted: number[], fraction: number): number | null {
 }
 
 export { MAX_EVENTS as MAX_TTS_DIAGNOSTICS };
+import { getRuntimeCapabilities, type RuntimeProvider } from './runtimeProfile';

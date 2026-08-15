@@ -1,4 +1,7 @@
 import { WordTimestamp } from './types';
+import { countWords } from '../text';
+
+export { countWords } from '../text';
 
 /**
  * Word timings interpolated inside a model-anchored sentence duration.
@@ -77,12 +80,6 @@ export function interpolateWordTimings(text: string, totalSeconds: number, start
 /** Normalizes passage text exactly as splitSentences does. */
 export function normalizePassageText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
-}
-
-/** Counts the whitespace-delimited words used by highlighting and chunk metadata. */
-export function countWords(text: string): number {
-  const normalized = normalizePassageText(text);
-  return normalized ? normalized.split(' ').length : 0;
 }
 
 /**

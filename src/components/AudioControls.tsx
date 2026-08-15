@@ -1,7 +1,16 @@
 import React from 'react';
 import { Play, Pause, RotateCcw, Cpu, Loader2, AlertCircle } from 'lucide-react';
 import { VoiceOption } from '../services/tts/types';
-import { PlaybackState } from '../services/audio/playbackController';
+import { PlaybackState, type PlaybackModelPhase } from '../services/audio/playbackController';
+
+type NarrationStatus =
+  | 'provider-fallback'
+  | 'initial-download'
+  | 'rebuffering'
+  | 'device-too-slow'
+  | 'retry'
+  | 'preparing'
+  | 'idle';
 
 interface AudioControlsProps {
   passageTitle: string;
@@ -9,7 +18,7 @@ interface AudioControlsProps {
   playbackState: PlaybackState;
   /** 0..1 while the Supertonic bundle downloads, null otherwise. */
   modelProgress: number | null;
-  modelPhase?: string | null;
+  modelPhase?: PlaybackModelPhase | null;
   errorMessage: string | null;
   disabled: boolean;
   onTogglePlay: () => void;
@@ -32,19 +41,8 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   const isPlaying = playbackState === 'playing';
   const isBusy = playbackState === 'preparing' || playbackState === 'rebuffering';
 
-  const status = modelPhase === 'provider-fallback'
-    ? 'provider-fallback'
-    : modelProgress !== null
-      ? 'initial-download'
-      : playbackState === 'rebuffering'
-        ? 'rebuffering'
-        : playbackState === 'device-too-slow'
-          ? 'device-too-slow'
-          : errorMessage
-            ? 'retry'
-            : playbackState === 'preparing'
-              ? 'preparing'
-              : 'idle';
+  const status = narrationStatus(playbackState, modelProgress, modelPhase, errorMessage);
+  const isRetryable = status === 'retry' || status === 'device-too-slow';
 
   const statusLabel = {
     'provider-fallback': 'Trying a compatible audio engine…',
@@ -88,7 +86,7 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
             className="btn-play-pause"
             onClick={onTogglePlay}
             disabled={disabled || isBusy}
-            aria-label={isPlaying ? 'Pause' : status === 'retry' || status === 'device-too-slow' ? 'Retry narration' : 'Play'}
+            aria-label={isPlaying ? 'Pause' : isRetryable ? 'Retry narration' : 'Play'}
           >
             {isBusy ? (
               <Loader2 size={22} className="spin" aria-hidden="true" />
@@ -115,3 +113,18 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
     </div>
   );
 };
+
+function narrationStatus(
+  playbackState: PlaybackState,
+  modelProgress: number | null,
+  modelPhase: PlaybackModelPhase | null | undefined,
+  errorMessage: string | null
+): NarrationStatus {
+  if (modelPhase === 'provider-fallback') return 'provider-fallback';
+  if (modelProgress !== null) return 'initial-download';
+  if (playbackState === 'rebuffering') return 'rebuffering';
+  if (playbackState === 'device-too-slow') return 'device-too-slow';
+  if (errorMessage) return 'retry';
+  if (playbackState === 'preparing') return 'preparing';
+  return 'idle';
+}

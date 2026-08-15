@@ -63,6 +63,7 @@ const MAX_PREPARED_BYTES = Math.floor(5.3 * 1024 * 1024);
 export class SynthesisCoordinator {
   private readonly tasks = new Map<string, Task>();
   private readonly cache = new Map<PreparationSlot, CacheEntry>();
+  private readonly identityKeys = new WeakMap<PassageSynthesisIdentity, string>();
   private running = false;
   private sequence = 0;
   private selectedPassage: string | null = null;
@@ -77,7 +78,7 @@ export class SynthesisCoordinator {
       return Promise.reject(new Error('Speculative synthesis is bounded to a passage first chunk'));
     }
     this.assertRuntimeIdentity(request.identity);
-    const passageKey = identityKey(request.identity);
+    const passageKey = this.identityKey(request.identity);
     const key = `${passageKey}\u0000${request.chunk.sourceStart}\u0000${request.chunk.sourceEnd}\u0000${request.chunk.text}`;
     const cached = [...this.cache.values()].find((entry) => entry.key === key);
     if (cached) {
@@ -294,6 +295,14 @@ export class SynthesisCoordinator {
       throw new Error('Synthesis identity does not match the active runtime');
     }
   }
+
+  private identityKey(identity: PassageSynthesisIdentity): string {
+    const existing = this.identityKeys.get(identity);
+    if (existing) return existing;
+    const key = serializeIdentity(identity);
+    this.identityKeys.set(identity, key);
+    return key;
+  }
 }
 
 function allocateSegmentWords(
@@ -322,7 +331,7 @@ function allocateSegmentWords(
   return words;
 }
 
-function identityKey(identity: PassageSynthesisIdentity): string {
+function serializeIdentity(identity: PassageSynthesisIdentity): string {
   return JSON.stringify([
     identity.translation,
     identity.book,
