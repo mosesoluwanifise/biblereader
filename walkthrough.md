@@ -58,11 +58,17 @@ wrong text.
 per-book chapter counts, split by testament for navigation. That catalog is
 correct and is the validation oracle for the U2 ingest pipeline.
 
-Text delivery is being moved from live API calls to bundled per-book JSON
-under `public/bibles/{translation}/{book}.json`, generated once by
-`scripts/build-bible-data.mjs` from `wldeh/bible-api` and committed to the
-repository. See KTD1 and KTD2 in the V1 plan for why that source and that
-packaging.
+Text ships as bundled per-book JSON under
+`public/bibles/{translation}/{book}.json`, generated once by
+`scripts/build-bible-data.mjs` from `bible-api.com` and committed.
+
+The source changed mid-project: the original one inlined translator footnotes
+into the verse text with no separate field, contaminating 18.8% of KJV verses.
+In WEB the notes are spliced mid-sentence with no delimiter, so no reliable
+strip is possible without risking truncated Scripture. The ingest now rejects
+footnote markers, replacement characters, and lone surrogates outright, and
+the same checks run against cached files so a stale build is rebuilt rather
+than skipped.
 
 ## Testing
 
