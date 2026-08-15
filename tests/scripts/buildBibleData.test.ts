@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  chapterUrl,
+  SINGLE_CHAPTER_VERSES,
   slugify,
   normalizeVerseText,
   normalizeChapter,
@@ -231,6 +233,16 @@ describe('validateBook', () => {
     expect(validateBook(book, 9).errors.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('rejects a chapter holding a single verse', () => {
+    // Obadiah shipped with 1 of its 21 verses and passed every other check:
+    // the chapter count was right and the chapter was not empty. No chapter in
+    // the Bible has one verse — Psalm 117, the shortest, has two.
+    const book = { translation: 'kjv', book: 'Obadiah', chapters: { '1': [{ verse: 1, text: 'The vision of Obadiah.' }] } };
+    const result = validateBook(book, 1);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/only 1 verse/);
+  });
+
   it('accepts single-chapter books with exactly one chapter key', () => {
     for (const name of ['Obadiah', 'Philemon', 'Jude', '2 John', '3 John']) {
       const book = makeBook(name, 1);
@@ -272,6 +284,19 @@ describe('fetchChapter', () => {
       /genesis 1: HTTP 503 \(3 attempts\)/
     );
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('single-chapter book URLs', () => {
+  it('requests an explicit verse range, since Book+1 means verse 1', () => {
+    expect(chapterUrl('kjv', 'Obadiah', 1, 21)).toContain('Obadiah+1:1-21');
+    // Multi-chapter books keep the plain chapter form.
+    expect(chapterUrl('kjv', 'Genesis', 1)).toContain('Genesis+1?');
+  });
+
+  it('covers every single-chapter book in the catalog', () => {
+    const singles = catalog.filter((b) => b.chapters === 1).map((b) => b.name).sort();
+    expect(Object.keys(SINGLE_CHAPTER_VERSES).sort()).toEqual(singles);
   });
 });
 

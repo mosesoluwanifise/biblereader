@@ -43,9 +43,40 @@ export const TRANSLATIONS = [
   { code: 'asv', upstream: 'asv', name: 'American Standard Version' }
 ];
 
-/** Polite against a small volunteer service; the build is one-time. */
-const CONCURRENCY = 2;
-const MAX_ATTEMPTS = 5;
+/**
+ * Polite against a small volunteer service; the build is one-time.
+ *
+ * Concurrency 2 with per-attempt backoff was still too aggressive across
+ * thousands of chapters: the service returned 429, the script retried through
+ * it, and the host eventually returned 403 to everything. Requests are now
+ * serial with a fixed floor between them, and a run aborts on the first sign
+ * of throttling rather than retrying into a block.
+ */
+const CONCURRENCY = 1;
+const MAX_ATTEMPTS = 3;
+/** Minimum spacing between requests, regardless of how fast they return. */
+const MIN_REQUEST_INTERVAL_MS = 350;
+
+let lastRequestAt = 0;
+async function throttle() {
+  const wait = lastRequestAt + MIN_REQUEST_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastRequestAt = Date.now();
+}
+
+/** Set once the host starts refusing us, so the run stops instead of digging in. */
+let blocked = false;
+
+export class UpstreamBlocked extends Error {
+  constructor(status) {
+    super(
+      `upstream refused the request (HTTP ${status}). The build stopped rather than ` +
+        `retrying into a longer block. Wait before rerunning; progress is kept, so ` +
+        `only the unfinished books are refetched.`
+    );
+    this.name = 'UpstreamBlocked';
+  }
+}
 
 /** "1 Samuel" -> "1samuel". Confirmed against the CDN: lowercase, spaces stripped. */
 export function slugify(bookName) {
@@ -153,6 +184,14 @@ export function validateBook(book, expectedChapters) {
       errors.push(`chapter ${n} is empty or missing`);
       continue;
     }
+    // No chapter in the Bible has a single verse — the shortest, Psalm 117,
+    // has two. A one-verse chapter therefore means a truncated fetch, which is
+    // exactly how Obadiah shipped with 1 of its 21 verses while passing every
+    // other check.
+    if (verses.length < 2) {
+      errors.push(`chapter ${n} has only ${verses.length} verse — no chapter is that short`);
+      continue;
+    }
     // Contamination is checked here too, not only at fetch time, so a cached
     // file written by an earlier build fails validation and gets rebuilt
     // instead of being silently skipped by the resume path.
@@ -179,23 +218,63 @@ export function validateBook(book, expectedChapters) {
   return { ok: errors.length === 0, errors };
 }
 
+/**
+ * Single-chapter books need an explicit verse range.
+ *
+ * `Obadiah+1` is read as *verse* 1, not chapter 1, so it returns a single
+ * verse — which looked structurally valid and silently cost 20 of Obadiah's
+ * 21 verses. A bare book name returns nothing, and an over-wide range like
+ * 1:1-99 is rejected, so the end verse has to be right. Candidates are tried
+ * in order because editions disagree on 3 John.
+ */
+export const SINGLE_CHAPTER_VERSES = {
+  Obadiah: [21],
+  Philemon: [25],
+  Jude: [25],
+  '2 John': [13],
+  '3 John': [15, 14]
+};
+
+export function chapterUrl(upstream, book, chapter, endVerse) {
+  const ref = endVerse
+    ? `${encodeURIComponent(book)}+${chapter}:1-${endVerse}`
+    : `${encodeURIComponent(book)}+${chapter}`;
+  return `${API}/${ref}?translation=${upstream}`;
+}
+
 export async function fetchChapter(upstream, book, chapter, options = {}) {
-  const { attempts = MAX_ATTEMPTS, backoffMs = 500 } = options;
-  const url = `${API}/${encodeURIComponent(book)}+${chapter}?translation=${upstream}`;
+  const { attempts = MAX_ATTEMPTS, backoffMs = 500, endVerse } = options;
+  const url = chapterUrl(upstream, book, chapter, endVerse);
   let lastError;
+
+  if (blocked) throw new UpstreamBlocked('already blocked');
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      await throttle();
       const res = await fetch(url);
-      // The service is rate limited; back off hard rather than hammering it.
+
+      // 403 means the host has stopped serving us entirely. Retrying only
+      // extends the block, so abandon the whole run.
+      if (res.status === 403) {
+        blocked = true;
+        throw new UpstreamBlocked(403);
+      }
+      // 429 is a warning shot. Wait on Retry-After, and treat a second one as
+      // a block rather than pressing on.
       if (res.status === 429) {
         const retryAfter = Number(res.headers.get('retry-after')) || 0;
-        await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 2 ** attempt * backoffMs * 4)));
+        if (attempt > 1) {
+          blocked = true;
+          throw new UpstreamBlocked(429);
+        }
+        await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 30_000)));
         throw new Error('HTTP 429');
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
+      if (err instanceof UpstreamBlocked) throw err;
       lastError = err;
       if (attempt < attempts) {
         await new Promise((r) => setTimeout(r, 2 ** attempt * backoffMs));
@@ -227,7 +306,27 @@ async function mapPool(items, limit, worker) {
 async function buildBook(translation, entry) {
   const chapterNumbers = Array.from({ length: entry.chapters }, (_, i) => i + 1);
 
+  const candidates = SINGLE_CHAPTER_VERSES[entry.name];
+
   const chapterVerses = await mapPool(chapterNumbers, CONCURRENCY, async (n) => {
+    if (candidates) {
+      // Try each known ending verse until one returns a whole book.
+      let lastError;
+      for (const endVerse of candidates) {
+        try {
+          const payload = await fetchChapter(translation.upstream, entry.name, n, { endVerse });
+          const verses = normalizeChapter(payload, { book: entry.name, chapter: n });
+          if (verses.length > 1) return verses;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw new Error(
+        `${entry.name}: no verse range in [${candidates.join(', ')}] returned a full chapter` +
+          (lastError ? ` (${lastError.message})` : '')
+      );
+    }
+
     const payload = await fetchChapter(translation.upstream, entry.name, n);
     return normalizeChapter(payload, { book: entry.name, chapter: n });
   });
@@ -287,6 +386,10 @@ async function main() {
         built += 1;
         verseCount += Object.values(book.chapters).reduce((s, v) => s + v.length, 0);
       } catch (err) {
+        if (err instanceof UpstreamBlocked || /upstream refused/.test(err.message)) {
+          console.error(`\n  STOPPED: ${err.message}`);
+          return { failures: [...failures, `${translation.code}/${entry.name}: ${err.message}`], aborted: true };
+        }
         failures.push(`${translation.code}/${entry.name}: ${err.message}`);
         console.error(`\n  FAIL ${translation.code}/${entry.name}: ${err.message}`);
         if (failures.length >= 3) return { failures, aborted: true };
