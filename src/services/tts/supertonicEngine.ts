@@ -277,7 +277,11 @@ export class SupertonicEngine {
     if (this.loadPromise) return this.loadPromise;
 
     this.status = 'loading';
-    this.preferredProfile = readRuntimeProfile(getRuntimeCapabilities());
+    this.preferredProfile = readRuntimeProfile(
+      getRuntimeCapabilities(),
+      undefined,
+      import.meta.env.VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED
+    );
     recordTtsDiagnostic({ phase: 'download', outcome: 'start' });
     const publish = (p: LoadProgress) => {
       this.lastProgress = p;

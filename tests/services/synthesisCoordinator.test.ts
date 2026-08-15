@@ -6,6 +6,7 @@ import {
   type SynthesisPreparationRequest
 } from '../../src/services/tts/synthesisCoordinator';
 import type { EngineRuntimeInfo, PassageSynthesisIdentity, SynthesisResult } from '../../src/services/tts/types';
+import { clearTtsDiagnostics, getTtsQualificationSnapshot } from '../../src/services/tts/diagnostics';
 
 const runtime: EngineRuntimeInfo = {
   provider: 'wasm',
@@ -89,6 +90,7 @@ describe('SynthesisCoordinator', () => {
   let coordinator: SynthesisCoordinator;
 
   beforeEach(() => {
+    clearTtsDiagnostics();
     engine = new FakeEngine();
     coordinator = new SynthesisCoordinator(engine);
   });
@@ -257,6 +259,10 @@ describe('SynthesisCoordinator', () => {
     expect(prepared.timingPredictionMs).toBe(500);
     expect(prepared.synthesisMs).toBe(1500);
     expect(prepared.productionFactor).toBeCloseTo(4 / 1.5);
+    const qualification = getTtsQualificationSnapshot();
+    expect(qualification.synthesisMs.p50).toBe(1500);
+    expect(qualification.productionFactor.p50).toBeCloseTo(4 / 1.5);
+    expect(qualification.productionFactor.p50).toBeLessThan(4 / 1);
   });
 
   it('bounds retained current and next audio by duration and bytes', async () => {

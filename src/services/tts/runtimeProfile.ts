@@ -70,12 +70,18 @@ export function compatibleProfile(
 
 export function readRuntimeProfile(
   capabilities: RuntimeCapabilities,
-  storage: Pick<Storage, 'getItem'> | null = typeof localStorage === 'undefined' ? null : localStorage
+  storage: Pick<Storage, 'getItem' | 'removeItem'> | null = typeof localStorage === 'undefined' ? null : localStorage,
+  approvedFiveStepModelVersion?: string
 ): RuntimeProfile | null {
   if (!storage) return null;
   try {
     const raw = storage.getItem(PROFILE_STORAGE_KEY);
-    return raw ? compatibleProfile(JSON.parse(raw), capabilities) : null;
+    const profile = raw ? compatibleProfile(JSON.parse(raw), capabilities) : null;
+    if (profile?.steps === 5 && approvedFiveStepModelVersion !== profile.modelVersion) {
+      storage.removeItem(PROFILE_STORAGE_KEY);
+      return null;
+    }
+    return profile;
   } catch {
     return null;
   }

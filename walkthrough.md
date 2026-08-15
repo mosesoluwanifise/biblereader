@@ -35,9 +35,16 @@ earns background playback and the lock-screen transport.
 - Narration is generated per session and the model samples from a random
   prior, so two readings of the same verse differ. Quality varies slightly
   between draws.
-- Synthesis runs at roughly 1.3x realtime on four WASM threads. Slower
-  devices will fall behind; playback banks a lead-in and works ahead of the
-  playhead to absorb it.
+- Provider throughput is hardware- and browser-specific. The engine selects
+  one atomic WebGPU or WASM session set, warms it before reporting ready, and
+  records real synthesis production factors. No provider is described as
+  universally faster.
+- Playback schedules the first completed startup chunk immediately. Later
+  sentences are packed into larger chunks and produced only to a 20-second
+  horizon. There is no fixed six-second lead-in hiding an unsustainable
+  producer; synthesis-caused underruns are measured separately from a
+  suspended or interrupted audio graph, and repeated slow-production evidence
+  reaches a retryable `device-too-slow` state.
 
 ## Defects fixed
 
@@ -80,6 +87,21 @@ Two tiers, because one does not cover this application:
   audio output, WebGPU versus WASM execution-provider selection, service
   worker behavior, and the PWA install gate. `onnxruntime-web` does not run
   meaningfully under jsdom.
+
+The default Playwright project is a deterministic Chromium diagnostic smoke
+and does not fetch model weights. `SUPERTONIC_QUALIFY=1` adds opt-in real-model
+WebGPU, forced-WASM, and initialization-fallback projects. Their attached JSON
+separates cold download/compile/warm-up evidence from warm scheduled-first-
+audio gates, records percentile and continuity metrics, and never contains
+Scripture text. Long-chapter qualification is separately enabled with
+`SUPERTONIC_LONG=1`; until such a run completes on a named reference class,
+this repository makes no zero-underrun claim for that class.
+
+ONNX Runtime 1.18 does not expose the worker's internal `GPUDevice`, so a true
+mid-session device-loss reset is a manual hardware/browser profile rather than
+a fabricated unit fixture. Record the reset mechanism, retryable terminal
+state, provider, and diagnostic attachment alongside the automated WebGPU
+initialization-failure result.
 
 ## Model licensing
 

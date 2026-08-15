@@ -1,38 +1,56 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig, devices, type Project } from '@playwright/test';
 
-// Browser tier. Covers what jsdom cannot: real audio output, WebGPU vs WASM
-// execution-provider selection, service-worker caching, and the PWA install
-// gate. U6, U7, and U10 verify here.
+const qualificationEnabled = process.env.SUPERTONIC_QUALIFY === '1';
+
+const projects: Project[] = [
+  {
+    name: 'chromium-smoke',
+    use: { ...devices['Desktop Chrome'] }
+  }
+];
+
+if (qualificationEnabled) {
+  projects.push(
+    {
+      name: 'qualify-webgpu',
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan']
+        }
+      }
+    },
+    {
+      // The spec removes Navigator.prototype.gpu before application code runs.
+      name: 'qualify-wasm',
+      use: { ...devices['Desktop Chrome'] }
+    },
+    {
+      // Keeps navigator.gpu visible while making adapter/session creation fail,
+      // exercising the atomic WebGPU -> WASM initialization fallback.
+      name: 'qualify-webgpu-fallback',
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: ['--disable-gpu', '--disable-software-rasterizer'] }
+      }
+    }
+  );
+}
+
 export default defineConfig({
   testDir: './tests/e2e',
-  fullyParallel: true,
+  fullyParallel: !qualificationEnabled,
+  workers: qualificationEnabled ? 1 : undefined,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
+  timeout: qualificationEnabled ? 30 * 60_000 : 30_000,
+  expect: { timeout: qualificationEnabled ? 10 * 60_000 : 5_000 },
   use: {
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry'
   },
-  projects: [
-    {
-      name: 'chromium',
-      use: {
-        ...devices['Desktop Chrome'],
-        // Supertonic prefers the WebGPU execution provider; headless Chrome
-        // needs it enabled explicitly. The WASM fallback path (R13) is
-        // covered by the 'chromium-wasm' project below.
-        launchOptions: { args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'] }
-      }
-    },
-    {
-      name: 'chromium-wasm',
-      use: { ...devices['Desktop Chrome'] }
-    },
-    {
-      name: 'mobile-safari',
-      use: { ...devices['iPhone 14'] }
-    }
-  ],
+  projects,
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:3000',

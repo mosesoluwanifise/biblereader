@@ -7,6 +7,7 @@ import type {
   WordTimestamp
 } from './types';
 import { interpolateWordTimings } from './wordTiming';
+import { recordTtsDiagnostic } from './diagnostics';
 
 export type SynthesisPriority = 'foreground' | 'speculative';
 export type PreparationSlot = 'current' | 'next';
@@ -235,13 +236,25 @@ export class SynthesisCoordinator {
     }
 
     const synthesisMs = this.now() - startedAt;
+    const productionFactor = synthesisMs > 0 ? result.duration / (synthesisMs / 1000) : Number.POSITIVE_INFINITY;
+    recordTtsDiagnostic({
+      phase: 'chunk',
+      durationMs: synthesisMs,
+      provider: request.identity.provider,
+      steps: request.identity.steps,
+      modelVersion: request.identity.modelVersion ?? undefined,
+      runtimeVersion: request.identity.runtimeVersion,
+      audioSeconds: result.duration,
+      realtimeFactor: productionFactor,
+      outcome: 'success'
+    });
     return {
       ...result,
       words,
       chunk: request.chunk,
       synthesisMs,
       timingPredictionMs,
-      productionFactor: synthesisMs > 0 ? result.duration / (synthesisMs / 1000) : Number.POSITIVE_INFINITY
+      productionFactor
     };
   }
 

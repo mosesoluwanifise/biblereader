@@ -6,6 +6,9 @@ import {
   ORT_RUNTIME_VERSION,
   profileForModel,
   providerOrder,
+  PROFILE_STORAGE_KEY,
+  readRuntimeProfile,
+  writeRuntimeProfile,
   type RuntimeCapabilities
 } from '../../src/services/tts/runtimeProfile';
 
@@ -41,6 +44,36 @@ describe('runtime profile', () => {
         capabilities
       )
     ).not.toBeNull();
+  });
+
+  it.each([undefined, 'different-model'])(
+    'clears persisted five-step state when deployment approval is %s',
+    (approval) => {
+      const profile = {
+        ...makeRuntimeProfile('model-1', 'wasm', capabilities),
+        steps: 5,
+        qualityGate: { steps: 5 as const, approved: true as const, modelVersion: 'model-1' }
+      };
+      writeRuntimeProfile(profile, localStorage);
+      expect(readRuntimeProfile(capabilities, localStorage, approval)).toBeNull();
+      expect(localStorage.getItem(PROFILE_STORAGE_KEY)).toBeNull();
+    }
+  );
+
+  it('loads a persisted five-step profile only while exact-model deployment approval remains active', () => {
+    const profile = {
+      ...makeRuntimeProfile('model-1', 'wasm', capabilities),
+      steps: 5,
+      qualityGate: { steps: 5 as const, approved: true as const, modelVersion: 'model-1' }
+    };
+    writeRuntimeProfile(profile, localStorage);
+    expect(readRuntimeProfile(capabilities, localStorage, 'model-1')).toEqual(profile);
+  });
+
+  it('keeps eight-step profiles when reduced-step approval is absent', () => {
+    const profile = makeRuntimeProfile('model-1', 'wasm', capabilities);
+    writeRuntimeProfile(profile, localStorage);
+    expect(readRuntimeProfile(capabilities, localStorage)).toEqual(profile);
   });
 
   it('ignores a profile recorded for different model weights', () => {
