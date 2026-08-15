@@ -22,11 +22,6 @@ yet built is marked as such. The V1 target is defined in
 Speech runs on Supertonic ONNX in a worker, with `window.speechSynthesis`
 as a labelled interim tier while the model downloads.
 
-Two books are missing from the bundled text: Obadiah (KJV) and Psalms and
-Obadiah (WEB). Requesting them blocked the upstream source; they need a
-refetch once that lifts. Those passages show a retryable error rather than
-wrong text.
-
 ## Known limitations
 
 - iOS suspends Web Audio when the screen locks, so lock-screen controls work
@@ -37,7 +32,6 @@ wrong text.
   between draws.
 - Synthesis runs at roughly 1.3x realtime on four WASM threads. Slower
   devices will fall behind and lean on the interim tier.
-- Obadiah (KJV) and Psalms and Obadiah (WEB) are absent pending a refetch.
 
 ## Defects fixed
 
