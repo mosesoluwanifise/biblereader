@@ -27,6 +27,18 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BUNDLE_DIR = join(ROOT, 'public', 'models', 'supertonic-3');
 const DEFAULT_BUCKET = 'scripture-voice-models';
 
+/**
+ * execFile's shell:true mode joins the args array into a command line
+ * without quoting on Windows, so any arg containing a space (this repo's own
+ * path, "Bible Reading App", among them) or a space-bearing value like
+ * "text/plain; charset=utf-8" gets split into extra argv tokens and confuses
+ * wrangler's yargs parser. Quote unconditionally on win32 to match cmd.exe's
+ * expectations; POSIX shells don't need it since args pass through as-is.
+ */
+function shellArg(arg) {
+  return process.platform === 'win32' ? `"${String(arg).replace(/"/g, '""')}"` : arg;
+}
+
 function contentTypeFor(path) {
   if (path.endsWith('.onnx')) return 'application/octet-stream';
   if (path.endsWith('.json')) return 'application/json';
@@ -58,11 +70,11 @@ async function uploadFile(bucket, entry) {
       'r2',
       'object',
       'put',
-      key,
+      shellArg(key),
       '--file',
-      localPath,
+      shellArg(localPath),
       '--content-type',
-      contentTypeFor(entry.path),
+      shellArg(contentTypeFor(entry.path)),
       '--remote'
     ],
     { shell: true, maxBuffer: 1 << 24 }
