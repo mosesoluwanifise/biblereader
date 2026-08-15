@@ -121,10 +121,12 @@ export function profileForModel(profile: RuntimeProfile | null, modelVersion: st
 export async function createAtomicSessionSet<T>(
   graphs: readonly string[],
   providers: readonly RuntimeProvider[],
-  factory: SessionFactory<T>
+  factory: SessionFactory<T>,
+  onProviderFallback?: (failed: RuntimeProvider, next: RuntimeProvider) => void
 ): Promise<{ provider: RuntimeProvider; sessions: Map<string, T> }> {
   let lastError: unknown;
-  for (const provider of providers) {
+  for (let providerIndex = 0; providerIndex < providers.length; providerIndex += 1) {
+    const provider = providers[providerIndex];
     const results = await Promise.allSettled(graphs.map((graph) => factory.create(graph, provider)));
     const created = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
@@ -134,6 +136,8 @@ export async function createAtomicSessionSet<T>(
 
     lastError = failure.reason;
     await Promise.allSettled(created.map((session) => factory.release(session)));
+    const next = providers[providerIndex + 1];
+    if (next) onProviderFallback?.(provider, next);
   }
   throw new Error(`Could not create Supertonic sessions: ${(lastError as Error)?.message ?? 'unknown error'}`);
 }

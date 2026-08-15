@@ -92,9 +92,9 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
             ))}
           </div>
           {/* Speed changes the duration the model is asked to fill, rather than
-              resampling finished audio, so pitch is unaffected. It applies from
-              the next sentence because the current one is already synthesized. */}
-          <p className="setting-hint">Applies from the next sentence.</p>
+              resampling finished audio, so pitch is unaffected. Existing
+              prepared audio is identity-bound and narration restarts. */}
+          <p className="setting-hint">Restarts narration at the new speed.</p>
         </fieldset>
 
         <fieldset className="setting-group">

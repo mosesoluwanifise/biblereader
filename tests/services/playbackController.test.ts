@@ -141,6 +141,31 @@ afterEach(() => {
 });
 
 describe('startup and adoption', () => {
+  it('prepares a startup chunk without creating or activating an audio graph', async () => {
+    const coordinator = new FakeCoordinator();
+    const controller = new PlaybackController(coordinator);
+    const text = 'A prepared sentence.';
+    await controller.preparePassage(text, {
+      translation: 'KJV',
+      book: 'Genesis',
+      chapter: 1,
+      sourceTextVersion: 'bible-v1',
+      sourceText: text,
+      startingVerse: 1,
+      startWordOffset: 0,
+      voiceId: 'F1',
+      speed: 1.05
+    });
+
+    expect(FakeAudioContext.live).toHaveLength(0);
+    expect(coordinator.calls).toHaveLength(1);
+    expect(coordinator.calls[0]).toMatchObject({
+      priority: 'speculative',
+      slot: 'current',
+      identity: { provider: 'wasm', steps: 8, modelVersion: 'model-1', runtimeVersion: '1.18.0' }
+    });
+  });
+
   it('unlocks the audio context synchronously', () => {
     const controller = new PlaybackController(new FakeCoordinator());
     controller.start('In the beginning God created.', 'F1');
@@ -162,6 +187,19 @@ describe('startup and adoption', () => {
     expect(coordinator.calls).toHaveLength(2);
     expect(states).toContain('playing');
     expect(FakeAudioContext.live[0].sources).toHaveLength(1);
+    controller.stop();
+  });
+
+  it('reports observable scheduled-ahead headroom after foreground audio is scheduled', async () => {
+    const coordinator = new FakeCoordinator();
+    coordinator.duration = 2;
+    const onBufferChange = vi.fn();
+    const controller = new PlaybackController(coordinator);
+    controller.start('First sentence. Second sentence.', 'F1', { onBufferChange });
+    await flush();
+    await flush();
+    expect(onBufferChange).toHaveBeenCalled();
+    expect(controller.getScheduledAheadSeconds()).toBeGreaterThan(0);
     controller.stop();
   });
 
@@ -253,6 +291,27 @@ describe('packed playback progress', () => {
 });
 
 describe('producer sustainability', () => {
+  it('keeps rebuffering observable while required synthesis is still outstanding', async () => {
+    const coordinator = new FakeCoordinator();
+    coordinator.duration = 0.05;
+    coordinator.deferAt.add(2);
+    const states: string[] = [];
+    const controller = new PlaybackController(coordinator);
+    controller.start('First sentence. Second sentence. Third sentence.', 'F1', {
+      onStateChange: (state) => states.push(state)
+    });
+    await flush();
+    await flush();
+    await settle(90);
+
+    expect(controller.getState()).toBe('rebuffering');
+    expect(states).toContain('rebuffering');
+    coordinator.deferred.get(2)?.();
+    await flush();
+    expect(controller.getState()).toBe('playing');
+    controller.stop();
+  });
+
   it('completes a sustainable full passage without synthesis underruns', async () => {
     FakeAudioContext.SPEEDUP = 10;
     const coordinator = new FakeCoordinator();

@@ -103,6 +103,36 @@ describe('SupertonicEngine lifecycle', () => {
     expect(engine.getStatus()).toBe('ready');
   });
 
+  it('reports a provider fallback phase to loading callers', async () => {
+    Object.defineProperty(navigator, 'gpu', { configurable: true, value: {} });
+    const progress = vi.fn();
+    const engine = new SupertonicEngine();
+    const loading = engine.load(progress);
+    const worker = FakeWorker.instances[0];
+    worker.emit({
+      id: worker.messages[0].id,
+      type: 'progress',
+      loaded: 20,
+      total: 100,
+      label: 'provider-fallback'
+    });
+    expect(progress).toHaveBeenLastCalledWith({ loaded: 20, total: 100, label: 'provider-fallback' });
+    expect(engine.getStatus()).toBe('loading');
+    worker.emit({
+      id: worker.messages[0].id,
+      type: 'loaded',
+      backend: 'wasm',
+      version: 'model-1',
+      voiceIds: ['voice-1'],
+      steps: 8,
+      compileMs: 1,
+      warmupMs: 1
+    });
+    await loading;
+    expect(progress).toHaveBeenCalledWith({ loaded: 20, total: 100, label: 'provider-fallback' });
+    delete (navigator as Navigator & { gpu?: unknown }).gpu;
+  });
+
   it('preserves cancellation messages and generation ordering', () => {
     const engine = new SupertonicEngine();
     // A worker is created lazily by load.

@@ -12,9 +12,14 @@ import {
   getNextChapter,
   loadChapter,
   computeVerseOffsets,
+  getBibleDataVersion,
   BIBLE_BOOKS
 } from './services/bible/bibleService';
-import { playbackController, PlaybackState } from './services/audio/playbackController';
+import {
+  playbackController,
+  PlaybackState,
+  type PassageIdentityInput
+} from './services/audio/playbackController';
 import { loadReadingState, saveReadingState } from './services/readingPosition';
 import {
   attachMediaSession,
@@ -33,7 +38,7 @@ import {
  */
 type ChapterState =
   | { status: 'loading'; key: string }
-  | { status: 'loaded'; key: string; verses: Verse[] }
+  | { status: 'loaded'; key: string; verses: Verse[]; dataVersion: string }
   | { status: 'error'; key: string; message: string; retryable: boolean };
 
 const passageKeyOf = (t: TranslationCode, b: string, c: number) => `${t}|${b}|${c}`;
@@ -62,9 +67,15 @@ export const App: React.FC = () => {
   const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [isVoiceSelectorOpen, setIsVoiceSelectorOpen] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
+  const [modelPhase, setModelPhase] = useState<string | null>(null);
+  const [engineReadyEpoch, setEngineReadyEpoch] = useState(0);
 
   /** Set when auto-advance moves the passage, so the effect resumes playback. */
   const continuePlaying = useRef(false);
+  const preparationEpoch = useRef(0);
+  const nextPrimeKey = useRef<string | null>(null);
+  const currentPassageKey = useRef(passageKey);
+  currentPassageKey.current = passageKey;
 
   // Chapter text is held here rather than inside the reader so that pressing
   // play never has to await a load — the iOS user-gesture chain cannot survive
@@ -77,7 +88,12 @@ export const App: React.FC = () => {
     loadChapter(book, chapter, translation).then((result: ChapterResult) => {
       if (!active) return;
       if (result.ok) {
-        setChapterState({ status: 'loaded', key, verses: result.verses });
+        setChapterState({
+          status: 'loaded',
+          key,
+          verses: result.verses,
+          dataVersion: result.dataVersion ?? 'bundled-unknown'
+        });
       } else {
         continuePlaying.current = false;
         setChapterState({
@@ -117,14 +133,18 @@ export const App: React.FC = () => {
     if (connection?.saveData) return;
     if (connection?.effectiveType && connection.effectiveType !== '4g') return;
 
-    const idle = window.requestIdleCallback ?? ((cb: IdleRequestCallback) => window.setTimeout(cb, 2000));
-    const cancel = window.cancelIdleCallback ?? window.clearTimeout;
-
-    // Progress is deliberately not reported here: a bar the reader never asked
-    // for reads as an error. Pressing play mid-warm picks up the same shared
-    // load promise and starts reporting from there.
-    const handle = idle(() => void supertonicEngine.load().catch(() => undefined));
-    return () => cancel(handle as number);
+    const warm = () => {
+      void supertonicEngine
+        .load()
+        .then(() => setEngineReadyEpoch((value) => value + 1))
+        .catch(() => undefined);
+    };
+    if (window.requestIdleCallback) {
+      const handle = window.requestIdleCallback(warm, { timeout: 5000 });
+      return () => window.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(warm, 2000);
+    return () => window.clearTimeout(handle);
   }, []);
 
   /** Verses only count as current when they belong to the displayed passage. */
@@ -132,6 +152,48 @@ export const App: React.FC = () => {
     () => (chapterState.status === 'loaded' && chapterState.key === passageKey ? chapterState.verses : null),
     [chapterState, passageKey]
   );
+
+  const currentDataVersion =
+    chapterState.status === 'loaded' && chapterState.key === passageKey
+      ? chapterState.dataVersion
+      : 'bundled-unknown';
+
+  const passageIdentity = useCallback(
+    (
+      text: string,
+      identityBook: string,
+      identityChapter: number,
+      startingVerse: number,
+      startWordOffset: number,
+      dataVersion: string
+    ): PassageIdentityInput => ({
+      translation,
+      book: identityBook,
+      chapter: identityChapter,
+      sourceTextVersion: dataVersion,
+      sourceText: text,
+      startingVerse,
+      startWordOffset,
+      voiceId: currentVoice.id,
+      speed
+    }),
+    [translation, currentVoice.id, speed]
+  );
+
+  // Matching text plus truthful engine readiness is enough to prepare the
+  // selected startup chunk. This never creates an AudioContext or autoplays.
+  useEffect(() => {
+    if (!currentVerses || !supertonicEngine.isReady()) return;
+    const epoch = ++preparationEpoch.current;
+    const text = currentVerses.map((verse) => verse.text).join(' ');
+    const identity = passageIdentity(text, book, chapter, currentVerses[0].verse, 0, currentDataVersion);
+    void playbackController.preparePassage(text, identity, 'current').catch((error) => {
+      if (epoch === preparationEpoch.current) setEngineError((error as Error).message || 'Narration preparation failed');
+    });
+    return () => {
+      if (epoch === preparationEpoch.current) playbackController.cancelPreparation('speculative');
+    };
+  }, [currentVerses, currentDataVersion, passageIdentity, book, chapter, engineReadyEpoch]);
 
   const beginPlayback = useCallback(
     (fromVerse?: number) => {
@@ -146,14 +208,63 @@ export const App: React.FC = () => {
 
       setEngineError(null);
       setActiveWordIndex(startWordOffset);
+      const text = selected.map((v) => v.text).join(' ');
+      const identity = passageIdentity(
+        text,
+        book,
+        chapter,
+        selected[0].verse,
+        startWordOffset,
+        currentDataVersion
+      );
+      const playbackPassageKey = passageKey;
+      const playbackPreparationEpoch = ++preparationEpoch.current;
+      nextPrimeKey.current = null;
 
       playbackController.start(
-        selected.map((v) => v.text).join(' '),
+        text,
         currentVoice.id,
         {
           onWord: setActiveWordIndex,
           onStateChange: setPlaybackState,
           onModelProgress: setModelProgress,
+          onModelPhase: setModelPhase,
+          onBufferChange: (scheduledAhead) => {
+            if (scheduledAhead <= 8) {
+              playbackController.cancelPreparation('speculative');
+              nextPrimeKey.current = null;
+              return;
+            }
+            if (scheduledAhead <= 12 || nextPrimeKey.current) return;
+            const next = getNextChapter(book, chapter);
+            if (!next) return;
+            const nextKey = passageKeyOf(translation, next.book, next.chapter);
+            nextPrimeKey.current = nextKey;
+            void loadChapter(next.book, next.chapter, translation).then(async (result) => {
+              if (
+                !result.ok ||
+                playbackPreparationEpoch !== preparationEpoch.current ||
+                currentPassageKey.current !== playbackPassageKey ||
+                playbackController.getScheduledAheadSeconds() <= 12
+              ) {
+                if (nextPrimeKey.current === nextKey) nextPrimeKey.current = null;
+                return;
+              }
+              const nextText = result.verses.map((verse) => verse.text).join(' ');
+              const dataVersion = result.dataVersion ?? (await getBibleDataVersion());
+              const nextIdentity = passageIdentity(
+                nextText,
+                next.book,
+                next.chapter,
+                result.verses[0].verse,
+                0,
+                dataVersion
+              );
+              await playbackController.preparePassage(nextText, nextIdentity, 'next');
+            }).catch(() => {
+              if (nextPrimeKey.current === nextKey) nextPrimeKey.current = null;
+            });
+          },
           onError: (message) => {
             setEngineError(message);
             setActiveWordIndex(-1);
@@ -170,10 +281,21 @@ export const App: React.FC = () => {
           }
         },
         startWordOffset,
-        speed
+        speed,
+        identity
       );
     },
-    [currentVerses, currentVoice.id, book, chapter, speed]
+    [
+      currentVerses,
+      currentVoice.id,
+      book,
+      chapter,
+      speed,
+      passageIdentity,
+      currentDataVersion,
+      passageKey,
+      translation
+    ]
   );
 
   // Resumes playback after auto-advance, once the next chapter's text is in.
@@ -195,6 +317,7 @@ export const App: React.FC = () => {
       void playbackController.resume();
       return;
     }
+    if (playbackState === 'preparing' || playbackState === 'rebuffering') return;
     beginPlayback();
   };
 
@@ -204,6 +327,9 @@ export const App: React.FC = () => {
 
   const stopForNavigation = () => {
     continuePlaying.current = false;
+    preparationEpoch.current += 1;
+    nextPrimeKey.current = null;
+    playbackController.cancelPreparation('speculative');
     playbackController.stop();
     setActiveWordIndex(-1);
   };
@@ -245,6 +371,7 @@ export const App: React.FC = () => {
     const detach = attachMediaSession({
       onPlay: () => {
         if (playbackState === 'paused') void playbackController.resume();
+        else if (playbackState === 'preparing' || playbackState === 'rebuffering') return;
         else beginPlayback();
       },
       onPause: () => void playbackController.pause(),
@@ -324,6 +451,7 @@ export const App: React.FC = () => {
         voice={currentVoice}
         playbackState={playbackState}
         modelProgress={modelProgress}
+        modelPhase={modelPhase}
         errorMessage={engineError}
         disabled={!currentVerses}
         onTogglePlay={handleTogglePlay}
@@ -339,7 +467,7 @@ export const App: React.FC = () => {
         speed={speed}
         translation={translation}
         onSpeed={(next) => {
-          // Applies from the next sentence; the current one is already made.
+          stopForNavigation();
           setSpeed(next);
         }}
       />

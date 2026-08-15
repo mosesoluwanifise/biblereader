@@ -62,13 +62,24 @@ describe('runtime profile', () => {
       })
     };
 
-    const result = await createAtomicSessionSet(['a', 'b', 'c', 'd'], ['webgpu', 'wasm'], factory);
+    const result = await createAtomicSessionSet(
+      ['a', 'b', 'c', 'd'],
+      ['webgpu', 'wasm'],
+      factory,
+      (failed, next) => events.push(`fallback:${failed}:${next}`)
+    );
     expect(result.provider).toBe('wasm');
     expect([...result.sessions.values()].every((session) => session.provider === 'wasm')).toBe(true);
     const firstWasmCreate = events.findIndex((event) => event.startsWith('create:wasm'));
     const releases = events.filter((event) => event.startsWith('release:webgpu'));
     expect(releases).toHaveLength(3);
     expect(events.slice(0, firstWasmCreate).filter((event) => event.startsWith('release:webgpu'))).toHaveLength(3);
+    const fallback = events.indexOf('fallback:webgpu:wasm');
+    const lastRelease = Math.max(
+      ...events.map((event, index) => (event.startsWith('release:webgpu') ? index : -1))
+    );
+    expect(fallback).toBeGreaterThan(lastRelease);
+    expect(fallback).toBeLessThan(firstWasmCreate);
   });
 
   it('stops after each provider fails and releases fulfilled sessions', async () => {

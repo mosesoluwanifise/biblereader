@@ -9,6 +9,7 @@ interface AudioControlsProps {
   playbackState: PlaybackState;
   /** 0..1 while the Supertonic bundle downloads, null otherwise. */
   modelProgress: number | null;
+  modelPhase?: string | null;
   errorMessage: string | null;
   disabled: boolean;
   onTogglePlay: () => void;
@@ -21,6 +22,7 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   voice,
   playbackState,
   modelProgress,
+  modelPhase,
   errorMessage,
   disabled,
   onTogglePlay,
@@ -28,13 +30,31 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   onOpenVoiceSelector
 }) => {
   const isPlaying = playbackState === 'playing';
-  const isBusy = playbackState === 'preparing';
+  const isBusy = playbackState === 'preparing' || playbackState === 'rebuffering';
 
-  const label = errorMessage
-    ? errorMessage
-    : playbackState === 'preparing'
-      ? 'Preparing…'
-      : passageTitle;
+  const status = modelPhase === 'provider-fallback'
+    ? 'provider-fallback'
+    : modelProgress !== null
+      ? 'initial-download'
+      : playbackState === 'rebuffering'
+        ? 'rebuffering'
+        : playbackState === 'device-too-slow'
+          ? 'device-too-slow'
+          : errorMessage
+            ? 'retry'
+            : playbackState === 'preparing'
+              ? 'preparing'
+              : 'idle';
+
+  const statusLabel = {
+    'provider-fallback': 'Trying a compatible audio engine…',
+    'initial-download': `Downloading voice model… ${Math.round((modelProgress ?? 0) * 100)}%`,
+    rebuffering: 'Rebuffering narration…',
+    'device-too-slow': errorMessage ?? 'This device is too slow for continuous narration.',
+    retry: `${errorMessage} Retry available.`,
+    preparing: 'Preparing narration…',
+    idle: passageTitle
+  }[status];
 
   return (
     <div className="player-bar">
@@ -42,7 +62,7 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
         <div className="player-info">
           <span className={`player-passage ${errorMessage ? 'player-passage--error' : ''}`}>
             {errorMessage && <AlertCircle size={13} aria-hidden="true" />}
-            {label}
+            {statusLabel}
           </span>
 
           <span className="player-meta">
@@ -51,11 +71,7 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
               <span>{voice.name}</span>
             </button>
 
-            {modelProgress !== null && (
-              <span className="player-upgrade" role="status">
-                Downloading voice… {Math.round(modelProgress * 100)}%
-              </span>
-            )}
+            {status !== 'idle' && <span className="player-upgrade" role="status" aria-live="polite">{statusLabel}</span>}
           </span>
         </div>
 
@@ -71,8 +87,8 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
           <button
             className="btn-play-pause"
             onClick={onTogglePlay}
-            disabled={disabled}
-            aria-label={isPlaying ? 'Pause' : 'Play'}
+            disabled={disabled || isBusy}
+            aria-label={isPlaying ? 'Pause' : status === 'retry' || status === 'device-too-slow' ? 'Retry narration' : 'Play'}
           >
             {isBusy ? (
               <Loader2 size={22} className="spin" aria-hidden="true" />

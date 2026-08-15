@@ -232,14 +232,19 @@ async function load(id: number, base: string, preferredProfile?: RuntimeProfile 
   sessions.clear();
   backend = null;
   const compileStarted = performance.now();
-  const selected = await createAtomicSessionSet(GRAPHS, providers, {
-    create: async (graph, provider) => {
-      return ort.InferenceSession.create(`${modelBase}/onnx/${graph}.onnx`, {
-        executionProviders: [provider]
-      });
+  const selected = await createAtomicSessionSet(
+    GRAPHS,
+    providers,
+    {
+      create: async (graph, provider) => {
+        return ort.InferenceSession.create(`${modelBase}/onnx/${graph}.onnx`, {
+          executionProviders: [provider]
+        });
+      },
+      release: (session) => session.release()
     },
-    release: (session) => session.release()
-  });
+    () => post({ id, type: 'progress', loaded, total, label: 'provider-fallback' })
+  );
   const compileMs = performance.now() - compileStarted;
   backend = selected.provider;
   for (const graph of GRAPHS) {

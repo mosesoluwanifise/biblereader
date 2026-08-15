@@ -26,7 +26,7 @@ export type ChapterFailure = 'not-found' | 'unavailable';
  * rendered as a blank screen indistinguishable from a real empty chapter.
  */
 export type ChapterResult =
-  | { ok: true; verses: Verse[] }
+  | { ok: true; verses: Verse[]; dataVersion?: string }
   | { ok: false; reason: ChapterFailure; message: string };
 
 export interface BibleLocation {

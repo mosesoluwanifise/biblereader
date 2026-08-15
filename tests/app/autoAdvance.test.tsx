@@ -21,7 +21,10 @@ const controller = vi.hoisted(() => ({
   stop: vi.fn(),
   pause: vi.fn(async () => {}),
   resume: vi.fn(async () => {}),
-  getState: vi.fn(() => 'idle' as const)
+  getState: vi.fn(() => 'idle' as const),
+  preparePassage: vi.fn(async () => null),
+  cancelPreparation: vi.fn(),
+  getScheduledAheadSeconds: vi.fn(() => 0)
 }));
 
 vi.mock('../../src/services/bible/bibleService', async (importOriginal) => {
@@ -75,7 +78,8 @@ beforeEach(() => {
   localStorage.clear();
   loadChapter.mockImplementation(async (book: string, chapter: number) => ({
     ok: true,
-    verses: versesFor(book, chapter)
+    verses: versesFor(book, chapter),
+    dataVersion: 'bible-v1'
   }));
 });
 
@@ -92,6 +96,18 @@ describe('auto-advance', () => {
     await waitFor(() => expect(controller.start).toHaveBeenCalledTimes(1));
     expect(textsPassedToStart()[0]).toContain('Genesis 1');
 
+    controller.getScheduledAheadSeconds.mockReturnValue(13);
+    const firstCallbacks = controller.start.mock.calls[0][2] as { onBufferChange?: (seconds: number) => void };
+    firstCallbacks.onBufferChange?.(13);
+    await waitFor(() => expect(controller.preparePassage).toHaveBeenCalledWith(
+      expect.stringContaining('Genesis 2'),
+      expect.objectContaining({ book: 'Genesis', chapter: 2, sourceTextVersion: 'bible-v1' }),
+      'next'
+    ));
+    const preparedIdentity = controller.preparePassage.mock.calls.at(-1)?.[1];
+    // Preparation alone must never trigger playback before the current end.
+    expect(controller.start).toHaveBeenCalledTimes(1);
+
     fireEnd();
 
     // The next start must carry Genesis 2's text. The bug produced a second
@@ -100,6 +116,7 @@ describe('auto-advance', () => {
     const second = textsPassedToStart()[1];
     expect(second).toContain('Genesis 2');
     expect(second).not.toContain('Genesis 1 verse');
+    expect(controller.start.mock.calls[1][5]).toEqual(preparedIdentity);
   });
 
   it('advances across a book boundary', async () => {
@@ -113,11 +130,23 @@ describe('auto-advance', () => {
 
     await user.click(screen.getByRole('button', { name: 'Play' }));
     await waitFor(() => expect(controller.start).toHaveBeenCalled());
+    controller.getScheduledAheadSeconds.mockReturnValue(13);
+    const callbacks = controller.start.mock.calls.at(-1)?.[2] as { onBufferChange?: (seconds: number) => void };
+    callbacks.onBufferChange?.(13);
+    await waitFor(() => expect(controller.preparePassage).toHaveBeenCalledWith(
+      expect.stringContaining('Exodus 1'),
+      expect.objectContaining({ book: 'Exodus', chapter: 1 }),
+      'next'
+    ));
+    const preparedIdentity = controller.preparePassage.mock.calls.at(-1)?.[1];
+    const beforeEnd = controller.start.mock.calls.length;
     fireEnd();
 
     await waitFor(() => {
       expect(textsPassedToStart().at(-1)).toContain('Exodus 1');
     });
+    expect(controller.start.mock.calls.length).toBe(beforeEnd + 1);
+    expect(controller.start.mock.calls.at(-1)?.[5]).toEqual(preparedIdentity);
   });
 
   it('does not advance past the end of Revelation', async () => {

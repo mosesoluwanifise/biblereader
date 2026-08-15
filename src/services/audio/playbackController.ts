@@ -13,12 +13,20 @@ import type {
 } from '../tts/types';
 import { MediaElementSink } from './mediaElementSink';
 
-export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'device-too-slow';
+export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'rebuffering' | 'device-too-slow';
+
+export type PassageIdentityInput = Omit<
+  PassageSynthesisIdentity,
+  'provider' | 'steps' | 'modelVersion' | 'runtimeVersion'
+> &
+  Partial<Pick<PassageSynthesisIdentity, 'provider' | 'steps' | 'modelVersion' | 'runtimeVersion'>>;
 
 export interface PlaybackCallbacks {
   onWord?: (globalWordIndex: number) => void;
   onStateChange?: (state: PlaybackState) => void;
   onModelProgress?: (fraction: number | null) => void;
+  onModelPhase?: (label: string | null) => void;
+  onBufferChange?: (scheduledAheadSeconds: number) => void;
   onSentence?: (index: number, total: number) => void;
   onEnd?: () => void;
   onError?: (message: string) => void;
@@ -64,6 +72,9 @@ export class PlaybackController {
   private underrunDurationMs = 0;
   private slowUnderrunEvidence = 0;
   private platformInterruptionCount = 0;
+  private bufferBand: 'low' | 'middle' | 'high' | null = null;
+  private passageIncomplete = false;
+  private requiredSynthesisGeneration: number | null = null;
 
   private static readonly BUFFER_HORIZON_SECONDS = 20;
   private static readonly UNDERRUN_TOLERANCE_SECONDS = 0.02;
@@ -73,6 +84,29 @@ export class PlaybackController {
 
   getState(): PlaybackState {
     return this.state;
+  }
+
+  getScheduledAheadSeconds(): number {
+    return this.context && this.playbackStarted ? Math.max(0, this.nextStartAt - this.context.currentTime) : 0;
+  }
+
+  cancelPreparation(scope: 'foreground' | 'speculative' = 'speculative'): void {
+    this.coordinator.cancelScope(scope);
+  }
+
+  /** Prepares only the startup chunk and never touches the audio graph. */
+  async preparePassage(
+    text: string,
+    identityInput: PassageIdentityInput,
+    slot: 'current' | 'next' = 'current'
+  ): Promise<PreparedSynthesisChunk | null> {
+    const runtime = supertonicEngine.getRuntimeInfo();
+    if (!supertonicEngine.isReady() || !runtime) return null;
+    const identity = completeIdentity(identityInput, runtime);
+    validateIdentityArguments(identity, text, identity.voiceId, identity.startWordOffset, identity.speed);
+    const startup = planSynthesisChunks(text, { startWordOffset: identity.startWordOffset })[0];
+    if (!startup) return null;
+    return this.coordinator.prepare({ identity, chunk: startup, priority: 'speculative', slot });
   }
 
   private setState(next: PlaybackState): void {
@@ -88,7 +122,7 @@ export class PlaybackController {
     callbacks: PlaybackCallbacks = {},
     startWordOffset = 0,
     speed?: number,
-    identity?: PassageSynthesisIdentity
+    identity?: PassageIdentityInput
   ): void {
     const requestKey = JSON.stringify([text, voiceId, startWordOffset, speed ?? null, identity ?? null]);
     if (this.state === 'preparing' && requestKey === this.activeRequestKey) {
@@ -131,38 +165,37 @@ export class PlaybackController {
     voiceId: string,
     startWordOffset: number,
     speed: number | undefined,
-    suppliedIdentity: PassageSynthesisIdentity | undefined,
+    suppliedIdentity: PassageIdentityInput | undefined,
     generation: number
   ): Promise<void> {
     try {
       if (!supertonicEngine.isReady()) {
         await supertonicEngine.load((progress) => {
-          if (generation === this.generation) this.callbacks.onModelProgress?.(progress.loaded / progress.total);
+          if (generation === this.generation) {
+            this.callbacks.onModelProgress?.(progress.loaded / progress.total);
+            this.callbacks.onModelPhase?.(progress.label);
+          }
         });
-        if (generation === this.generation) this.callbacks.onModelProgress?.(null);
+        if (generation === this.generation) {
+          this.callbacks.onModelProgress?.(null);
+          this.callbacks.onModelPhase?.(null);
+        }
       }
       if (generation !== this.generation) return;
 
       const runtime = supertonicEngine.getRuntimeInfo();
       if (!runtime) throw new Error('Engine runtime is unavailable after loading');
-      const identity =
-        suppliedIdentity ??
-        anonymousIdentity(text, voiceId, startWordOffset, speed ?? 1.05, runtime);
-      if (
-        suppliedIdentity &&
-        (identity.sourceText !== text ||
-          identity.startWordOffset !== startWordOffset ||
-          identity.voiceId !== voiceId ||
-          identity.speed !== (speed ?? 1.05))
-      ) {
-        throw new Error('Playback arguments do not match the supplied passage identity');
-      }
+      const identity = suppliedIdentity
+        ? completeIdentity(suppliedIdentity, runtime)
+        : anonymousIdentity(text, voiceId, startWordOffset, speed ?? 1.05, runtime);
+      validateIdentityArguments(identity, text, voiceId, startWordOffset, speed ?? 1.05);
       const chunks = planSynthesisChunks(text, { startWordOffset });
       this.totalSentences = chunks.reduce((count, chunk) => count + chunk.segments.length, 0);
       if (chunks.length === 0) {
         this.finish(generation);
         return;
       }
+      this.passageIncomplete = true;
 
       for (const chunk of chunks) {
         if (this.playbackStarted) {
@@ -171,20 +204,27 @@ export class PlaybackController {
         }
         if (generation !== this.generation) return;
 
-        const prepared = await this.coordinator.prepare({
-          identity,
-          chunk,
-          priority: 'foreground',
-          slot: chunk.kind === 'startup' ? 'current' : undefined
-        });
+        this.requiredSynthesisGeneration = generation;
+        let prepared: PreparedSynthesisChunk;
+        try {
+          prepared = await this.coordinator.prepare({
+            identity,
+            chunk,
+            priority: 'foreground',
+            slot: chunk.kind === 'startup' ? 'current' : undefined
+          });
+        } finally {
+          if (this.requiredSynthesisGeneration === generation) this.requiredSynthesisGeneration = null;
+        }
         if (generation !== this.generation) return;
         this.scheduleChunk(prepared, generation);
         if (!this.playbackStarted) {
           this.playbackStarted = true;
           this.setState('playing');
           this.startWordClock(generation);
-        }
+        } else if (this.state === 'rebuffering') this.setState('playing');
       }
+      this.passageIncomplete = false;
 
       await this.waitUntil(this.nextStartAt, generation);
       if (generation === this.generation) this.finish(generation);
@@ -271,6 +311,7 @@ export class PlaybackController {
   private observeLowWater(): void {
     if (!this.context || !this.playbackStarted) return;
     const ahead = Math.max(0, this.nextStartAt - this.context.currentTime);
+    this.notifyBuffer(ahead);
     this.lowWaterSeconds = Math.min(this.lowWaterSeconds, ahead);
     recordTtsDiagnostic({
       phase: 'playback',
@@ -301,6 +342,17 @@ export class PlaybackController {
     const tick = () => {
       if (generation !== this.generation || !this.context) return;
       const now = this.context.currentTime;
+      const scheduledAhead = Math.max(0, this.nextStartAt - now);
+      this.notifyBuffer(scheduledAhead);
+      if (
+        scheduledAhead <= PlaybackController.UNDERRUN_TOLERANCE_SECONDS &&
+        this.passageIncomplete &&
+        this.requiredSynthesisGeneration === generation &&
+        this.context.state === 'running' &&
+        this.state === 'playing'
+      ) {
+        this.setState('rebuffering');
+      }
       for (const entry of this.scheduled) {
         if (now < entry.startAt) continue;
         this.reportAudibleSegments(entry, Math.min(entry.buffer.duration, now - entry.startAt));
@@ -338,6 +390,13 @@ export class PlaybackController {
   private stopWordClock(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     this.rafId = null;
+  }
+
+  private notifyBuffer(ahead: number): void {
+    const band = ahead <= 8 ? 'low' : ahead > 12 ? 'high' : 'middle';
+    if (band === this.bufferBand) return;
+    this.bufferBand = band;
+    this.callbacks.onBufferChange?.(ahead);
   }
 
   async pause(): Promise<void> {
@@ -415,6 +474,9 @@ export class PlaybackController {
     this.underrunDurationMs = 0;
     this.slowUnderrunEvidence = 0;
     this.platformInterruptionCount = 0;
+    this.bufferBand = null;
+    this.passageIncomplete = false;
+    this.requiredSynthesisGeneration = null;
   }
 }
 
@@ -458,6 +520,36 @@ function anonymousIdentity(
     modelVersion: runtime.modelVersion,
     runtimeVersion: runtime.ortVersion
   };
+}
+
+function completeIdentity(
+  input: PassageIdentityInput,
+  runtime: NonNullable<ReturnType<typeof supertonicEngine.getRuntimeInfo>>
+): PassageSynthesisIdentity {
+  return {
+    ...input,
+    provider: runtime.provider,
+    steps: runtime.steps,
+    modelVersion: runtime.modelVersion,
+    runtimeVersion: runtime.ortVersion
+  };
+}
+
+function validateIdentityArguments(
+  identity: PassageSynthesisIdentity,
+  text: string,
+  voiceId: string,
+  startWordOffset: number,
+  speed: number
+): void {
+  if (
+    identity.sourceText !== text ||
+    identity.startWordOffset !== startWordOffset ||
+    identity.voiceId !== voiceId ||
+    identity.speed !== speed
+  ) {
+    throw new Error('Playback arguments do not match the supplied passage identity');
+  }
 }
 
 export const playbackController = new PlaybackController();
