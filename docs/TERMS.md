@@ -1,8 +1,6 @@
 # Terms of Use — Scripture Voice
 
-**Status: DRAFT — not legally reviewed. See "Before release" below.**
-
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
 ## 1. The application
 
@@ -82,24 +80,3 @@ record.
 This application performs synthesis on your device. Chapter text and model
 files are cached locally in your browser. No account is required, no audio is
 uploaded, and no voice recordings are collected.
-
----
-
-## Before release
-
-These terms are a good-faith reproduction of the obligations the Open RAIL-M
-licence places on a distributor, drafted from the licence text shipped with the
-weights. They have **not** been reviewed by a lawyer.
-
-Section 4(a) of the licence requires the Attachment A restrictions to be
-included "as an enforceable provision" in the agreement governing downstream
-use. Whether the presentation in this application actually forms an
-enforceable agreement — and whether acceptance needs to be affirmative rather
-than by continued use — is a legal question, not an engineering one.
-
-Required before charging money or distributing publicly:
-
-- Legal review of this document and of the acceptance mechanism.
-- A decision on whether first run must present an explicit accept step.
-- Confirmation that linking `/models/supertonic-3/LICENSE` satisfies the
-  licence's requirement to give recipients a copy.
