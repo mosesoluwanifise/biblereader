@@ -44,6 +44,16 @@ class FakeAudioContext {
     return source;
   }
 
+  /**
+   * Sources feed the sink's bus rather than the speakers directly. No
+   * createMediaStreamDestination here on purpose: the sink then takes its
+   * speakers fallback, which keeps these tests about scheduling. The
+   * media-element route has its own tests in mediaElementSink.test.ts.
+   */
+  createGain() {
+    return { connect: vi.fn(), disconnect: vi.fn() };
+  }
+
   async suspend() {
     this.state = 'suspended';
     this.frozenAt = Date.now();

@@ -1,6 +1,7 @@
 import { supertonicEngine, EngineCancelled } from '../tts/supertonicEngine';
 import { splitSentences } from '../tts/wordTiming';
 import { WordTimestamp } from '../tts/types';
+import { MediaElementSink } from './mediaElementSink';
 
 /**
  * Owns audio playback for a passage.
@@ -42,6 +43,7 @@ interface Chunk {
 
 export class PlaybackController {
   private context: AudioContext | null = null;
+  private sink: MediaElementSink | null = null;
   private source: AudioBufferSourceNode | null = null;
   private state: PlaybackState = 'idle';
   private callbacks: PlaybackCallbacks = {};
@@ -139,9 +141,12 @@ export class PlaybackController {
     this.voiceId = voiceId;
     this.speed = speed;
 
-    // Synchronous, pre-await: keeps the gesture chain intact.
+    // Synchronous, pre-await: keeps the gesture chain intact. The media
+    // element has the same requirement as the context — it has to be started
+    // from inside the gesture or the browser refuses it.
     const context = this.ensureContext();
     void context.resume();
+    this.ensureSink().activate();
 
     this.sentences = splitSentences(text);
     this.wordOffsets = [];
@@ -159,9 +164,23 @@ export class PlaybackController {
 
   private ensureContext(): AudioContext {
     if (!this.context || this.context.state === 'closed') {
+      // A sink belongs to the context it was built from, so it goes with it.
+      this.sink?.release();
+      this.sink = null;
       this.context = new AudioContext();
     }
     return this.context;
+  }
+
+  /**
+   * The node sources connect to. Routing through a media element rather than
+   * straight to the speakers is what lets playback survive the screen locking
+   * — see MediaElementSink.
+   */
+  private ensureSink(): MediaElementSink {
+    const context = this.ensureContext();
+    if (!this.sink) this.sink = new MediaElementSink(context);
+    return this.sink;
   }
 
   private async synthesize(index: number, generation: number): Promise<Chunk | null> {
@@ -268,7 +287,7 @@ export class PlaybackController {
 
     const source = context.createBufferSource();
     source.buffer = chunk.buffer;
-    source.connect(context.destination);
+    source.connect(this.ensureSink().node);
     source.start(startAt);
 
     const endAt = startAt + chunk.buffer.duration;
@@ -353,6 +372,9 @@ export class PlaybackController {
   async pause(): Promise<void> {
     if (this.state !== 'playing' || !this.context) return;
     await this.context.suspend();
+    // A suspended graph feeds the element silence, which it would happily go
+    // on "playing" — leaving the lock screen claiming we are still reading.
+    this.sink?.pause();
     this.stopWordClock();
     this.setState('paused');
   }
@@ -360,6 +382,7 @@ export class PlaybackController {
   async resume(): Promise<void> {
     if (this.state !== 'paused' || !this.context) return;
     await this.context.resume();
+    this.sink?.resume();
     this.setState('playing');
     this.startWordClock(this.generation);
   }
@@ -385,6 +408,10 @@ export class PlaybackController {
     this.scheduled = [];
 
     if (this.context && this.context.state === 'suspended') void this.context.resume();
+
+    // Hand the media session back. Left playing, the lock screen would keep
+    // offering transport controls for a chapter that is no longer running.
+    this.sink?.pause();
 
     this.cursor = 0;
     this.nextStartAt = 0;
