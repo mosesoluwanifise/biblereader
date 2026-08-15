@@ -13,32 +13,31 @@ yet built is marked as such. The V1 target is defined in
 | Bundled Bible text (KJV / WEB / ASV) | Built |
 | Local-first text service with offline cache | Built |
 | Voice cloning removal | Done |
-| Supertonic ONNX synthesis | Not built — U11, U5, U6 |
-| Word-level timing | Not built — U7 |
-| Playback controller (pause/resume, auto-advance) | Broken — U8 |
-| Reading position, auto-scroll | Not built — U9 |
-| PWA install, offline caching, MediaSession | Broken — U10 |
+| Supertonic ONNX synthesis | Built |
+| Word-level timing | Built |
+| Playback controller (pause/resume, auto-advance) | Built |
+| Reading position, auto-scroll, settings | Built |
+| PWA install, offline caching, MediaSession | Built |
 
-Speech still runs on `window.speechSynthesis`. Until U6 lands, the
-playback defects listed below are live.
+Speech runs on Supertonic ONNX in a worker, with `window.speechSynthesis`
+as a labelled interim tier while the model downloads.
 
-## Defects still open
+Two books are missing from the bundled text: Obadiah (KJV) and Psalms and
+Obadiah (WEB). Requesting them blocked the upstream source; they need a
+refetch once that lifts. Those passages show a retryable error rather than
+wrong text.
 
-- `SupertonicEngine` is `window.speechSynthesis` with pitch and rate offsets.
-  It performs no ONNX inference. The ten "preset voices" collapse onto
-  whatever one to three voices the host OS provides. U6 replaces this with
-  real inference over the ten shipped voice styles.
-- Auto-advance sets the next chapter and then invokes a `handleTogglePlay`
-  captured from the previous render, so it replays the prior chapter while the
-  UI shows the next one. U8 replaces the timer with effect-driven advance.
-- Pause calls `speechSynthesis.cancel()`, which discards position. Resuming
-  restarts the chapter. U8.
-- The play path awaits chapter text before speaking, severing the iOS
-  user-gesture chain, so playback never starts on iOS Safari. U8.
-- The manifest references icons that exist in no directory, so the browser
-  install gate fails and the app is not installable. U10.
-- The service worker precaches five build assets and no Bible text, so the
-  offline guarantee depends entirely on the IndexedDB layer today. U10.
+## Known limitations
+
+- iOS suspends Web Audio when the screen locks, so lock-screen controls work
+  while the app is foregrounded but playback still stops on lock. Routing
+  output through an `<audio>` element would fix it.
+- Narration is generated per session and the model samples from a random
+  prior, so two readings of the same verse differ. Quality varies slightly
+  between draws.
+- Synthesis runs at roughly 1.3x realtime on four WASM threads. Slower
+  devices will fall behind and lean on the interim tier.
+- Obadiah (KJV) and Psalms and Obadiah (WEB) are absent pending a refetch.
 
 ## Defects fixed
 
