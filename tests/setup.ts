@@ -7,9 +7,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// jsdom implements neither of these, and both are load-bearing for the reader:
-// auto-scroll to the active word (U9) and the reduced-motion opt-out.
+// jsdom implements none of these, and all are load-bearing for the reader:
+// auto-scroll to the active word (U9), the jump to the top of a hand-picked
+// chapter, and the reduced-motion opt-out. scrollTo reports "Not implemented"
+// through the virtual console rather than throwing, so it cannot be guarded at
+// the call site — it has to be replaced here.
 Element.prototype.scrollIntoView = vi.fn();
+window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
 
 if (!window.matchMedia) {
   window.matchMedia = ((query: string) => ({

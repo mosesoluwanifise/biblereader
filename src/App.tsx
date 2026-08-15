@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { BibleView } from './components/BibleView';
+import { ChapterPicker } from './components/ChapterPicker';
 import { AudioControls } from './components/AudioControls';
 import { VoiceSelector } from './components/VoiceSelector';
 import { ReaderSettings } from './components/ReaderSettings';
@@ -207,6 +208,22 @@ export const App: React.FC = () => {
     setActiveWordIndex(-1);
   };
 
+  /**
+   * A chapter chosen by hand starts at its beginning.
+   *
+   * The picker is sticky, so it is now reachable from anywhere in a passage.
+   * Before, it could only be used at the top of the page and the scroll offset
+   * was always near zero, which hid the fact that nothing resets it — jumping
+   * from deep in one chapter would otherwise drop the reader into the middle
+   * of the next one.
+   *
+   * Instant rather than smooth: animating a jump of several thousand pixels is
+   * slower and more disorienting than simply arriving. Deliberately not called
+   * on translation or voice changes, where the reader is holding their place,
+   * nor on auto-advance, where the highlight scrolls itself.
+   */
+  const scrollToPassageTop = () => window.scrollTo({ top: 0, behavior: 'auto' });
+
   const handleSelectTranslation = (next: TranslationCode) => {
     stopForNavigation();
     setTranslation(next); // R11: book and chapter are preserved.
@@ -238,6 +255,7 @@ export const App: React.FC = () => {
         stopForNavigation();
         setBook(next.book);
         setChapter(next.chapter);
+        scrollToPassageTop();
       }
     });
     return detach;
@@ -265,13 +283,31 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-container" style={{ ['--verse-scale' as string]: String(fontScale) }}>
-      <Header
-        currentTranslation={translation}
-        onSelectTranslation={handleSelectTranslation}
-        currentVoice={currentVoice}
-        onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-      />
+      {/* Header and picker stick as one unit — see .app-topbar. */}
+      <div className="app-topbar">
+        <Header
+          currentTranslation={translation}
+          onSelectTranslation={handleSelectTranslation}
+          currentVoice={currentVoice}
+          onOpenVoiceSelector={() => setIsVoiceSelectorOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
+
+        <ChapterPicker
+          book={book}
+          chapter={chapter}
+          onSelectBook={(newBook) => {
+            stopForNavigation();
+            setBook(newBook);
+            scrollToPassageTop();
+          }}
+          onSelectChapter={(newChapter) => {
+            stopForNavigation();
+            setChapter(newChapter);
+            scrollToPassageTop();
+          }}
+        />
+      </div>
 
       <BibleView
         translation={translation}
@@ -279,14 +315,6 @@ export const App: React.FC = () => {
         chapter={chapter}
         state={viewState}
         onRetry={() => setReloadToken((n) => n + 1)}
-        onSelectBook={(newBook) => {
-          stopForNavigation();
-          setBook(newBook);
-        }}
-        onSelectChapter={(newChapter) => {
-          stopForNavigation();
-          setChapter(newChapter);
-        }}
         activeWordIndex={activeWordIndex}
         onSelectVerseToRead={(verse) => beginPlayback(verse)}
       />
