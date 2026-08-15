@@ -237,17 +237,24 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 1rem;
 }
 
 .player-info {
   display: flex;
   flex-direction: column;
+  /* A flex item defaults to min-width:auto, so a long passage title would
+     refuse to shrink and push the bar wider than its own width setting. */
+  min-width: 0;
 }
 
 .player-passage {
   font-weight: 600;
   font-size: 1rem;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .player-voice-tag {
@@ -325,7 +332,9 @@ body {
 
 .voice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  /* min() so the 220px track floor cannot exceed the modal's own width on a
+     narrow screen, which would overflow the dialog. */
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
   gap: 0.85rem;
   margin-bottom: 1.25rem;
 }
@@ -491,6 +500,137 @@ a.player-disclosure:hover { border-color: var(--accent-gold); color: var(--accen
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: 0.5rem;
+}
+
+/* Phones ----------------------------------------------------------------
+ *
+ * The layout was built desktop-first and had no breakpoint at all, so at
+ * 375px the page laid out 602px wide. Two causes, one feeding the other:
+ *
+ *  - .header-controls is a nowrap flex row, and a <select> is sized by its
+ *    widest option — "KJV — King James" alone claimed 224px. Brand plus
+ *    controls needed 602px and simply overflowed.
+ *  - .player-bar is fixed with width: calc(100% - 3rem). Once the header had
+ *    stretched the initial containing block to 602px, that resolved against
+ *    602 rather than the 375 viewport, so the bar drew itself 554px wide.
+ *
+ * body has overflow-x: hidden, so none of this scrolled — the controls were
+ * simply clipped off-screen and unreachable.
+ */
+@media (max-width: 640px) {
+  .app-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+  }
+
+  .brand-title {
+    font-size: 1.15rem;
+    gap: 0.5rem;
+  }
+
+  /* Controls take their own full-width row rather than competing with the
+     brand for horizontal space. */
+  .header-controls {
+    width: 100%;
+    gap: 0.5rem;
+  }
+
+  .header-controls .select-badge {
+    padding: 0.45rem 0.65rem;
+    font-size: 0.8rem;
+  }
+
+  /* min-width: 0 is what actually lets the select shrink below its widest
+     option; without it flex refuses to compress it. */
+  .header-controls select.select-badge {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .header-controls button.select-badge {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .header-controls button.select-badge span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .reader-container {
+    padding: 0 1rem;
+    margin: 1.25rem auto 8.5rem auto;
+  }
+
+  .nav-bar {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding: 0.75rem 0.85rem;
+  }
+
+  .navigation-selectors {
+    width: 100%;
+    gap: 0.5rem;
+  }
+
+  .navigation-selectors .select-input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .chapter-title {
+    font-size: 1.6rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .verse-item {
+    padding: 0.5rem 0.6rem;
+  }
+
+  /* Anchoring to both edges drops the calc(100%) dependency on the containing
+     block entirely, so the bar can never be sized by page overflow again. */
+  .player-bar {
+    left: 0.75rem;
+    right: 0.75rem;
+    width: auto;
+    max-width: none;
+    transform: none;
+    bottom: 0.75rem;
+    padding: 0.75rem 0.9rem;
+  }
+
+  /* Wraps rather than compressing. The disclosure takes its own row instead
+     of being hidden: it is the Attachment A(e) notice that the narration is
+     machine-generated, so it has to stay visible on phones too. */
+  .player-main {
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+  }
+
+  .player-info {
+    flex: 1 1 auto;
+  }
+
+  .player-controls {
+    gap: 0.5rem;
+    flex: 0 0 auto;
+  }
+
+  .player-disclosure {
+    flex: 0 0 auto;
+    order: 3;
+  }
+
+  .modal-overlay {
+    padding: 1rem;
+  }
+
+  .modal-content {
+    padding: 1.25rem;
+    max-height: 90vh;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
