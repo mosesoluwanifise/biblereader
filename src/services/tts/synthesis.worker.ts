@@ -1,6 +1,15 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web';
 import { softenAllCaps } from './wordTiming';
+import {
+  compatibleProfile,
+  createAtomicSessionSet,
+  getRuntimeCapabilities,
+  profileForModel,
+  providerOrder,
+  type RuntimeProfile,
+  type RuntimeProvider
+} from './runtimeProfile';
 
 /**
  * Runs Supertonic inference off the main thread.
@@ -64,11 +73,12 @@ interface StyleTensors {
 const sessions = new Map<Graph, ort.InferenceSession>();
 const styles = new Map<string, StyleTensors>();
 let indexer: number[] | null = null;
-let backend: 'webgpu' | 'wasm' | null = null;
+let backend: RuntimeProvider | null = null;
+let runtimeSteps = 8;
 let modelBase = '/models/supertonic-3';
 
 export type WorkerRequest =
-  | { id: number; type: 'load'; modelBase: string }
+  | { id: number; type: 'load'; modelBase: string; preferredProfile?: RuntimeProfile | null }
   | {
       id: number;
       type: 'synthesize';
@@ -83,7 +93,16 @@ export type WorkerRequest =
 
 export type WorkerResponse =
   | { id: number; type: 'progress'; loaded: number; total: number; label: string }
-  | { id: number; type: 'loaded'; backend: string; version: string | null; voiceIds: string[] }
+  | {
+      id: number;
+      type: 'loaded';
+      backend: RuntimeProvider;
+      version: string | null;
+      voiceIds: string[];
+      steps: number;
+      compileMs: number;
+      warmupMs: number;
+    }
   | {
       id: number;
       type: 'audio';
@@ -96,7 +115,7 @@ export type WorkerResponse =
       speechDuration: number;
     }
   | { id: number; type: 'cancelled' }
-  | { id: number; type: 'error'; message: string };
+  | { id: number; type: 'error'; message: string; providerLost?: boolean };
 
 /**
  * Generations older than this are abandoned. Stopping playback used to leave
@@ -144,7 +163,11 @@ function gaussian(): number {
 const post = (message: WorkerResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(message, transfer);
 
-async function load(id: number, base: string): Promise<void> {
+async function releaseSessions(values: Iterable<ort.InferenceSession> = sessions.values()): Promise<void> {
+  await Promise.allSettled([...values].map((session) => session.release()));
+}
+
+async function load(id: number, base: string, preferredProfile?: RuntimeProfile | null): Promise<void> {
   modelBase = base;
   const manifest = await fetch(`${modelBase}/manifest.json`).then((r) => {
     if (!r.ok) throw new Error(`Model manifest unavailable (HTTP ${r.status})`);
@@ -178,20 +201,13 @@ async function load(id: number, base: string): Promise<void> {
   indexer = await fetch(`${modelBase}/onnx/unicode_indexer.json`).then((r) => r.json());
   step('tokenizer', sizeOf('onnx/unicode_indexer.json', 3e5));
 
-  /**
-   * WASM first, WebGPU as fallback — the reverse of what R13 assumed.
-   *
-   * Measured in this worker on the full Genesis 1:1-3 passage at 8 steps:
-   * WASM 1.34x realtime, WebGPU 1.09x. Both clear playback, but WASM wins.
-   * These graphs are small and the flow loop runs 8 sequential passes, so
-   * per-call GPU transfer overhead outweighs the parallelism, and any op
-   * lacking a WebGPU kernel falls back to CPU mid-graph anyway.
-   *
-   * WebGPU is retained rather than dropped: this is one machine's integrated
-   * GPU, and a discrete card could plausibly reverse it. Ordering is the only
-   * thing that changed.
-   */
-  const providers: ('wasm' | 'webgpu')[] = 'gpu' in navigator ? ['wasm', 'webgpu'] : ['wasm'];
+  const capabilities = getRuntimeCapabilities(globalThis);
+  const compatible = compatibleProfile(preferredProfile, capabilities);
+  // The worker is the first code to know the fetched model version. Never use
+  // a provider or quality gate recorded against different weights.
+  const profile = profileForModel(compatible, manifest.version ?? null);
+  const providers = providerOrder(capabilities, profile);
+  runtimeSteps = profile?.steps ?? 8;
 
   /**
    * All four graphs at once, not one after another.
@@ -203,26 +219,24 @@ async function load(id: number, base: string): Promise<void> {
    * themselves, and it is what the U5 spike already did when it measured load
    * time. Sessions are independent objects; nothing here is order-dependent.
    */
-  await Promise.all(
-    GRAPHS.map(async (graph) => {
-      const url = `${modelBase}/onnx/${graph}.onnx`;
-      let session: ort.InferenceSession | null = null;
-      let lastError: unknown;
-
-      for (const provider of providers) {
-        try {
-          session = await ort.InferenceSession.create(url, { executionProviders: [provider] });
-          if (backend === null) backend = provider;
-          break;
-        } catch (err) {
-          lastError = err;
-        }
-      }
-      if (!session) throw new Error(`Could not load ${graph}: ${(lastError as Error)?.message ?? 'unknown'}`);
-      sessions.set(graph, session);
-      step(graph, sizeOf(`onnx/${graph}.onnx`, 1e7));
-    })
-  );
+  await releaseSessions();
+  sessions.clear();
+  backend = null;
+  const compileStarted = performance.now();
+  const selected = await createAtomicSessionSet(GRAPHS, providers, {
+    create: async (graph, provider) => {
+      return ort.InferenceSession.create(`${modelBase}/onnx/${graph}.onnx`, {
+        executionProviders: [provider]
+      });
+    },
+    release: (session) => session.release()
+  });
+  const compileMs = performance.now() - compileStarted;
+  backend = selected.provider;
+  for (const graph of GRAPHS) {
+    sessions.set(graph, selected.sessions.get(graph)!);
+    step(graph, sizeOf(`onnx/${graph}.onnx`, 1e7));
+  }
 
   // Ten styles at ~292 KB each: trivial bytes, but ten serial round trips is a
   // second of pure latency on a slow link for no reason.
@@ -233,8 +247,6 @@ async function load(id: number, base: string): Promise<void> {
       step(`voice ${voiceId}`, sizeOf(`voice_styles/${voiceId}.json`, 3e5));
     })
   );
-
-  post({ id, type: 'loaded', backend: backend ?? 'wasm', version: manifest.version ?? null, voiceIds });
 
   /**
    * Run the chain once and throw the audio away.
@@ -249,13 +261,23 @@ async function load(id: number, base: string): Promise<void> {
    * The load task still owns the queue, so a play pressed mid-load waits for
    * this — about a second, against a download an order of magnitude longer.
    */
-  if (voiceIds.length > 0) {
-    try {
-      await synthesize(id, 'Amen.', voiceIds[0], 8, liveGeneration, DEFAULT_SPEED, false);
-    } catch {
-      /* Warm-up is an optimization; a failure here must not fail the load. */
-    }
-  }
+  if (voiceIds.length === 0) throw new Error('Model manifest contains no voice styles');
+  step('warmup', 0);
+  const warmupStarted = performance.now();
+  await synthesize(id, 'Amen.', voiceIds[0], runtimeSteps, liveGeneration, DEFAULT_SPEED, false, false);
+  const warmupMs = performance.now() - warmupStarted;
+
+  // Ready means every graph has successfully run, not merely been allocated.
+  post({
+    id,
+    type: 'loaded',
+    backend,
+    version: manifest.version ?? null,
+    voiceIds,
+    steps: runtimeSteps,
+    compileMs,
+    warmupMs
+  });
 }
 
 async function synthesize(
@@ -266,10 +288,12 @@ async function synthesize(
   generation: number,
   speed: number = DEFAULT_SPEED,
   /** False for the post-load warm-up, which discards its audio. */
-  emit = true
+  emit = true,
+  /** Model warm-up is part of loading and must not be cancelled by transport Stop. */
+  cancellable = true
 ): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
-  assertLive(generation);
+  if (cancellable) assertLive(generation);
   const style = styles.get(voiceId) ?? styles.values().next().value;
   if (!style) throw new Error(`Unknown voice: ${voiceId}`);
 
@@ -317,7 +341,7 @@ async function synthesize(
   for (let step = 0; step < steps; step += 1) {
     // Checked between steps so an abandoned run stops within one step rather
     // than completing the whole chain.
-    assertLive(generation);
+    if (cancellable) assertLive(generation);
     const out = await ve.run({
       noisy_latent: latent,
       text_emb: encoded.text_emb,
@@ -330,7 +354,7 @@ async function synthesize(
     latent = out.denoised_latent as ort.Tensor;
   }
 
-  assertLive(generation);
+  if (cancellable) assertLive(generation);
   const vocoded = await sessions.get('vocoder')!.run({ latent });
   if (!emit) return;
   const source = vocoded.wav_tts.data as Float32Array;
@@ -407,7 +431,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   queue = queue.then(async () => {
     try {
       if (request.type === 'load') {
-        await load(request.id, request.modelBase);
+        await load(request.id, request.modelBase, request.preferredProfile);
       } else {
         await synthesize(
           request.id,
@@ -423,7 +447,13 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
         post({ id: request.id, type: 'cancelled' });
         return;
       }
-      post({ id: request.id, type: 'error', message: (err as Error)?.message ?? 'Synthesis failed' });
+      const message = (err as Error)?.message ?? 'Synthesis failed';
+      post({
+        id: request.id,
+        type: 'error',
+        message,
+        providerLost: backend === 'webgpu' && /device\s*(?:was\s*)?lost|GPUDevice.*lost/i.test(message)
+      });
     }
   });
 };

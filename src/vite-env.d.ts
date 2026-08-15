@@ -7,4 +7,6 @@ interface ImportMetaEnv {
    * see src/services/tts/synthesis.worker.ts for why.
    */
   readonly VITE_ORT_WASM_BASE?: string;
+  /** Exact model version whose five-step profile passed the release listening/timing gate. */
+  readonly VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED?: string;
 }

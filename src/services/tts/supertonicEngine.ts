@@ -1,7 +1,18 @@
-import { SynthesisResult, WordTimestamp } from './types';
+import { EngineRuntimeInfo, SynthesisResult, WordTimestamp } from './types';
 import { DEFAULT_VOICE_ID } from './voices';
 import { interpolateWordTimings } from './wordTiming';
 import type { WorkerRequest, WorkerResponse } from './synthesis.worker';
+import { recordTtsDiagnostic } from './diagnostics';
+import {
+  clearRuntimeProfile,
+  getRuntimeCapabilities,
+  makeRuntimeProfile,
+  ORT_RUNTIME_VERSION,
+  readRuntimeProfile,
+  writeRuntimeProfile,
+  type RuntimeProfile,
+  type RuntimeProvider
+} from './runtimeProfile';
 
 export { PRESET_VOICES, findVoice, DEFAULT_VOICE_ID } from './voices';
 
@@ -42,6 +53,9 @@ interface Pending {
   resolve: (value: never) => void;
   reject: (reason: Error) => void;
   onProgress?: (p: LoadProgress) => void;
+  startedAt: number;
+  steps?: number;
+  requestType: WorkerRequest['type'];
 }
 
 /** Plain Omit collapses a discriminated union into its shared keys. */
@@ -62,6 +76,8 @@ export class SupertonicEngine {
   private status: EngineStatus = 'idle';
   private loadPromise: Promise<void> | null = null;
   private backend: string | null = null;
+  private runtimeSteps = DEFAULT_STEPS;
+  private preferredProfile: RuntimeProfile | null = null;
   private version: string | null = null;
   private voiceIds: string[] = [];
   private currentGeneration = 1;
@@ -74,6 +90,16 @@ export class SupertonicEngine {
 
   getBackend(): string | null {
     return this.backend;
+  }
+
+  getRuntimeInfo(): EngineRuntimeInfo | null {
+    if (!this.backend) return null;
+    return {
+      provider: this.backend as RuntimeProvider,
+      steps: this.runtimeSteps,
+      modelVersion: this.version,
+      ortVersion: ORT_RUNTIME_VERSION
+    };
   }
 
   getVersion(): string | null {
@@ -96,6 +122,7 @@ export class SupertonicEngine {
     worker.onerror = (event) => {
       const error = new Error(event.message || 'Synthesis worker failed');
       this.status = 'failed';
+      this.loadPromise = null;
       for (const [, entry] of this.pending) entry.reject(error);
       this.pending.clear();
     };
@@ -116,12 +143,71 @@ export class SupertonicEngine {
         this.backend = message.backend;
         this.version = message.version;
         this.voiceIds = message.voiceIds;
+        this.runtimeSteps = message.steps;
+        {
+          const capabilities = getRuntimeCapabilities();
+          const attemptedFirst = this.preferredProfile?.provider ?? (capabilities.webgpu ? 'webgpu' : 'wasm');
+          if (attemptedFirst !== message.backend) {
+            recordTtsDiagnostic({
+              phase: 'provider-fallback',
+              provider: message.backend,
+              steps: message.steps,
+              outcome: 'success'
+            });
+          }
+        }
+        recordTtsDiagnostic({
+          phase: 'compile',
+          durationMs: message.compileMs,
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        recordTtsDiagnostic({
+          phase: 'warmup',
+          durationMs: message.warmupMs,
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        recordTtsDiagnostic({
+          phase: 'download',
+          durationMs: Math.max(0, performance.now() - entry.startedAt - message.compileMs - message.warmupMs),
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        if (message.version) {
+          const qualityApproved =
+            import.meta.env.VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED === message.version;
+          const storedSteps = qualityApproved ? 5 : message.steps;
+          const stored = makeRuntimeProfile(message.version, message.backend, getRuntimeCapabilities(), storedSteps);
+          if (qualityApproved) {
+            stored.qualityGate = { steps: 5, approved: true, modelVersion: message.version };
+          } else if (message.steps === 5 && this.preferredProfile?.qualityGate) {
+            stored.qualityGate = this.preferredProfile.qualityGate;
+          }
+          writeRuntimeProfile(stored);
+        }
         this.status = 'ready';
         this.pending.delete(message.id);
         (entry.resolve as unknown as () => void)();
         break;
       case 'audio':
         this.pending.delete(message.id);
+        {
+          const durationMs = performance.now() - entry.startedAt;
+          const audioSeconds = message.audio.byteLength / Float32Array.BYTES_PER_ELEMENT / message.sampleRate;
+          recordTtsDiagnostic({
+            phase: 'synthesis',
+            durationMs,
+            provider: (this.backend as RuntimeProvider | null) ?? undefined,
+            steps: entry.steps,
+            audioSeconds,
+            realtimeFactor: durationMs > 0 ? audioSeconds / (durationMs / 1000) : undefined,
+            outcome: 'success'
+          });
+        }
         (entry.resolve as unknown as (v: WorkerResponse) => void)(message);
         break;
       case 'cancelled':
@@ -130,6 +216,18 @@ export class SupertonicEngine {
         break;
       case 'error':
         this.pending.delete(message.id);
+        recordTtsDiagnostic({
+          phase: entry.requestType === 'load' ? 'compile' : 'synthesis',
+          durationMs: performance.now() - entry.startedAt,
+          provider: (this.backend as RuntimeProvider | null) ?? undefined,
+          steps: entry.steps,
+          outcome: 'failure'
+        });
+        if (message.providerLost) {
+          clearRuntimeProfile();
+          this.status = 'failed';
+          this.loadPromise = null;
+        }
         entry.reject(new Error(message.message));
         break;
     }
@@ -142,7 +240,14 @@ export class SupertonicEngine {
     const worker = this.ensureWorker();
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as never, reject, onProgress });
+      this.pending.set(id, {
+        resolve: resolve as never,
+        reject,
+        onProgress,
+        startedAt: performance.now(),
+        steps: request.type === 'synthesize' ? request.steps : undefined,
+        requestType: request.type
+      });
       worker.postMessage({ ...request, id } as WorkerRequest);
     });
   }
@@ -168,13 +273,22 @@ export class SupertonicEngine {
     if (this.loadPromise) return this.loadPromise;
 
     this.status = 'loading';
+    this.preferredProfile = readRuntimeProfile(getRuntimeCapabilities());
+    recordTtsDiagnostic({ phase: 'download', outcome: 'start' });
     const publish = (p: LoadProgress) => {
       this.lastProgress = p;
       for (const listener of this.progressListeners) listener(p);
     };
 
-    this.loadPromise = this.send<void>({ type: 'load', modelBase: MODEL_BASE }, publish)
+    this.loadPromise = this.send<void>(
+      { type: 'load', modelBase: MODEL_BASE, preferredProfile: this.preferredProfile },
+      publish
+    )
       .catch((err) => {
+        recordTtsDiagnostic({
+          phase: 'download',
+          outcome: 'failure'
+        });
         this.status = 'failed';
         this.loadPromise = null;
         throw err;
@@ -194,7 +308,7 @@ export class SupertonicEngine {
   async synthesizeSentence(
     text: string,
     voiceId: string = DEFAULT_VOICE_ID,
-    steps: number = DEFAULT_STEPS,
+    steps?: number,
     generation: number = this.generation,
     speed?: number
   ): Promise<SynthesisResult> {
@@ -208,7 +322,7 @@ export class SupertonicEngine {
       type: 'synthesize',
       text: trimmed,
       voiceId,
-      steps,
+      steps: steps ?? this.runtimeSteps,
       generation,
       speed
     });
@@ -254,6 +368,10 @@ export class SupertonicEngine {
     this.status = 'idle';
     this.loadPromise = null;
     this.backend = null;
+    this.runtimeSteps = DEFAULT_STEPS;
+    this.preferredProfile = null;
+    this.version = null;
+    this.voiceIds = [];
     this.progressListeners.clear();
     this.lastProgress = null;
   }

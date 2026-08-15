@@ -13,6 +13,13 @@ export interface SynthesisResult {
   words: WordTimestamp[];
 }
 
+export interface EngineRuntimeInfo {
+  provider: 'webgpu' | 'wasm';
+  steps: number;
+  modelVersion: string | null;
+  ortVersion: string;
+}
+
 export interface PlannedChunkSegment {
   /** Index in the sentence-like segments returned by splitSentences(). */
   sentenceIndex: number;
