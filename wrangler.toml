@@ -1,0 +1,16 @@
+name = "biblereader"
+compatibility_date = "2026-08-01"
+pages_build_output_dir = "dist"
+
+# Backs functions/models/[[path]].js, which proxies the Supertonic bundle
+# same-origin. Populate it with: npm run deploy:models
+#
+# The bucket must exist before the first Pages deploy (Dashboard -> R2, or
+# `npx wrangler r2 bucket create scripture-voice-models`) and this binding
+# must also be added in the Pages project itself — Dashboard -> Settings ->
+# Functions -> R2 bucket bindings, name MODELS, mapped to this bucket. A
+# git-connected Pages project builds via the dashboard, not `wrangler deploy`,
+# so this file documents the binding; it does not create it for you.
+[[r2_buckets]]
+binding = "MODELS"
+bucket_name = "scripture-voice-models"

@@ -31,7 +31,7 @@ async function sizeOf(path) {
   }
 }
 
-export async function checkReleaseAssets({ verifyChecksums = true } = {}) {
+export async function checkReleaseAssets({ verifyChecksums = true, checkModels = true } = {}) {
   const problems = [];
 
   // Bible text
@@ -47,6 +47,15 @@ export async function checkReleaseAssets({ verifyChecksums = true } = {}) {
     if (count !== EXPECTED_BOOKS) {
       problems.push(`public/bibles/${code}/ has ${count} books, expected ${EXPECTED_BOOKS}`);
     }
+  }
+
+  // The Cloudflare Pages deploy serves models from R2 via
+  // functions/models/[[path]].js instead of a local public/models/ folder —
+  // see wrangler.toml and scripts/upload-models-to-r2.mjs. There is nothing
+  // local to check in that case, and skipping it is a deploy-time choice, not
+  // an incomplete build.
+  if (!checkModels) {
+    return { ok: problems.length === 0, problems };
   }
 
   // Model manifest
@@ -105,13 +114,19 @@ export async function checkReleaseAssets({ verifyChecksums = true } = {}) {
 }
 
 async function main() {
-  const { ok, problems, manifest } = await checkReleaseAssets();
+  const checkModels = !process.argv.includes('--skip-models');
+  const { ok, problems, manifest } = await checkReleaseAssets({ checkModels });
 
   if (!ok) {
     console.error('\nRelease assets are incomplete:\n');
     for (const p of problems) console.error(`  - ${p}`);
     console.error('\nA build without these deploys an app whose narration cannot start.\n');
     process.exitCode = 1;
+    return;
+  }
+
+  if (!checkModels) {
+    console.log(`release assets ok — bibles 3x${EXPECTED_BOOKS} (models served from R2, not checked locally)`);
     return;
   }
 

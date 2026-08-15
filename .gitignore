@@ -49,3 +49,6 @@ spikes/**/models/
 
 # Spike audio output
 spikes/**/*.wav
+
+# Cloudflare Wrangler local state (wrangler pages dev, local R2 emulation)
+.wrangler/

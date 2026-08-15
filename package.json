@@ -7,13 +7,15 @@
     "dev": "vite",
     "build": "node scripts/check-release-assets.mjs && tsc && vite build",
     "build:app": "tsc && vite build",
+    "build:cloudflare": "node scripts/build-for-cloudflare.mjs",
     "check:assets": "node scripts/check-release-assets.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "build:bible": "node scripts/build-bible-data.mjs",
-    "build:models": "node scripts/build-model-assets.mjs"
+    "build:models": "node scripts/build-model-assets.mjs",
+    "deploy:models": "node scripts/upload-models-to-r2.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.428.0",

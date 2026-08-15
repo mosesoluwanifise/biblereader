@@ -13,6 +13,27 @@ import * as ort from 'onnxruntime-web';
  * than copied.
  */
 
+/**
+ * Points onnxruntime-web at a CDN copy of its own WASM runtime instead of the
+ * copy Vite bundles locally. Unset by default: every host except Cloudflare
+ * Pages serves the bundled copy exactly as before, and dev/build stay fully
+ * offline-capable with no third-party dependency added.
+ *
+ * Cloudflare Pages caps a static asset at 25 MiB. The threaded SIMD JSEP
+ * build — needed for both the wasm and webgpu execution providers, since the
+ * jsep variant is the only one with WebGPU compiled in — is 26.8 MB and
+ * fails to deploy as a Pages asset. jsDelivr serves the identical file:
+ * verified byte-for-byte via sha256 against the locally installed version,
+ * with `Cross-Origin-Resource-Policy: cross-origin` and
+ * `Access-Control-Allow-Origin: *`, either of which satisfies this app's
+ * `Cross-Origin-Embedder-Policy: require-corp`. scripts/build-for-cloudflare.mjs
+ * sets this to the exact installed version and strips the now-unused local
+ * copy from the build output; no other build target touches it.
+ */
+if (import.meta.env.VITE_ORT_WASM_BASE) {
+  ort.env.wasm.wasmPaths = import.meta.env.VITE_ORT_WASM_BASE;
+}
+
 const SAMPLE_RATE = 44100;
 const HOP = 512; // ae.base_chunk_size
 const LATENT_DIM = 24; // ae.ldim
