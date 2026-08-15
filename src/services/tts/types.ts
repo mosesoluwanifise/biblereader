@@ -9,8 +9,35 @@ export interface SynthesisResult {
   sampleRate: number;
   /** Actual audio length in seconds. */
   duration: number;
+  /** Detected speech span inside the model's padded audio buffer. */
+  speechStart?: number;
+  speechDuration?: number;
   /** Word spans within this utterance, starting at 0. */
   words: WordTimestamp[];
+}
+
+export interface PassageSynthesisIdentity {
+  translation: string;
+  book: string;
+  chapter: number;
+  sourceTextVersion: string;
+  sourceText: string;
+  startingVerse: number;
+  startWordOffset: number;
+  voiceId: string;
+  speed: number;
+  steps: number;
+  provider: EngineRuntimeInfo['provider'];
+  modelVersion: string | null;
+  runtimeVersion: string;
+}
+
+export interface PreparedSynthesisChunk extends SynthesisResult {
+  chunk: PlannedSynthesisChunk;
+  synthesisMs: number;
+  timingPredictionMs: number;
+  /** Generated audio seconds divided by all synthesis/timing wall seconds. */
+  productionFactor: number;
 }
 
 export interface EngineRuntimeInfo {

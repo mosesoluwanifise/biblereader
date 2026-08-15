@@ -89,6 +89,14 @@ export type WorkerRequest =
       /** Divides the predicted duration: higher is faster speech. */
       speed?: number;
     }
+  | {
+      id: number;
+      type: 'predict-duration';
+      text: string;
+      voiceId: string;
+      generation: number;
+      speed?: number;
+    }
   | { id: number; type: 'cancel'; generation: number };
 
 export type WorkerResponse =
@@ -103,6 +111,7 @@ export type WorkerResponse =
       compileMs: number;
       warmupMs: number;
     }
+  | { id: number; type: 'duration'; predicted: number }
   | {
       id: number;
       type: 'audio';
@@ -308,14 +317,7 @@ async function synthesize(
   const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map((v) => BigInt(v))), [1, n]);
   const textMask = new ort.Tensor('float32', new Float32Array(n).fill(1), [1, 1, n]);
 
-  const durationOut = await sessions.get('duration_predictor')!.run({
-    text_ids: textIds,
-    style_dp: style.dp,
-    text_mask: textMask
-  });
-  // Speed shortens the window the model fills rather than resampling the
-  // result, so the voice does not change pitch.
-  const predicted = Number((durationOut.duration.data as Float32Array)[0]) / speed;
+  const predicted = await runDurationPredictor(textIds, textMask, style, speed);
 
   const targetSamples = Math.max(1, Math.round(predicted * SAMPLE_RATE));
   // The latent grid is quantised to HOP * COMPRESS samples, so the vocoder
@@ -418,6 +420,44 @@ async function synthesize(
   );
 }
 
+async function runDurationPredictor(
+  textIds: ort.Tensor,
+  textMask: ort.Tensor,
+  style: StyleTensors,
+  speed: number
+): Promise<number> {
+  const durationOut = await sessions.get('duration_predictor')!.run({
+    text_ids: textIds,
+    style_dp: style.dp,
+    text_mask: textMask
+  });
+  // Speed shortens the window the model fills rather than resampling the
+  // result, so the voice does not change pitch.
+  return Number((durationOut.duration.data as Float32Array)[0]) / speed;
+}
+
+async function predictDuration(
+  id: number,
+  text: string,
+  voiceId: string,
+  generation: number,
+  speed: number = DEFAULT_SPEED
+): Promise<void> {
+  if (!indexer) throw new Error('Engine not loaded');
+  assertLive(generation);
+  const style = styles.get(voiceId) ?? styles.values().next().value;
+  if (!style) throw new Error(`Unknown voice: ${voiceId}`);
+  const ids = [...tagText(softenAllCaps(text))].map((ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    return cp < indexer!.length ? indexer![cp] : 0;
+  });
+  const textIds = new ort.Tensor('int64', BigInt64Array.from(ids.map((value) => BigInt(value))), [1, ids.length]);
+  const textMask = new ort.Tensor('float32', new Float32Array(ids.length).fill(1), [1, 1, ids.length]);
+  const predicted = await runDurationPredictor(textIds, textMask, style, speed);
+  assertLive(generation);
+  post({ id, type: 'duration', predicted });
+}
+
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const request = event.data;
 
@@ -432,7 +472,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     try {
       if (request.type === 'load') {
         await load(request.id, request.modelBase, request.preferredProfile);
-      } else {
+      } else if (request.type === 'synthesize') {
         await synthesize(
           request.id,
           request.text,
@@ -441,6 +481,8 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
           request.generation,
           request.speed
         );
+      } else {
+        await predictDuration(request.id, request.text, request.voiceId, request.generation, request.speed);
       }
     } catch (err) {
       if (err instanceof Cancelled) {

@@ -210,6 +210,10 @@ export class SupertonicEngine {
         }
         (entry.resolve as unknown as (v: WorkerResponse) => void)(message);
         break;
+      case 'duration':
+        this.pending.delete(message.id);
+        (entry.resolve as unknown as (v: number) => void)(message.predicted);
+        break;
       case 'cancelled':
         this.pending.delete(message.id);
         entry.reject(new EngineCancelled());
@@ -342,8 +346,29 @@ export class SupertonicEngine {
       audio,
       sampleRate: result.sampleRate,
       duration,
+      speechStart,
+      speechDuration,
       words: interpolateWordTimings(trimmed, speechDuration, speechStart)
     };
+  }
+
+  /** Runs only the model's duration graph for an isolated timing anchor. */
+  async predictDuration(
+    text: string,
+    voiceId: string = DEFAULT_VOICE_ID,
+    generation: number = this.generation,
+    speed?: number
+  ): Promise<number> {
+    const trimmed = text.trim();
+    if (!trimmed) return 0;
+    if (!this.isReady()) throw new Error('Engine not loaded');
+    return this.send<number>({
+      type: 'predict-duration',
+      text: trimmed,
+      voiceId,
+      generation,
+      speed
+    });
   }
 
   /** Current generation; synthesis requests are tagged with it. */

@@ -110,4 +110,33 @@ describe('SupertonicEngine lifecycle', () => {
     expect(engine.cancelInFlight()).toBe(2);
     expect(FakeWorker.instances[0].messages.at(-1)).toMatchObject({ type: 'cancel', generation: 2 });
   });
+
+  it('exposes isolated duration prediction without running a synthesis request', async () => {
+    const engine = new SupertonicEngine();
+    const loading = engine.load();
+    const worker = FakeWorker.instances[0];
+    worker.emit({
+      id: worker.messages[0].id,
+      type: 'loaded',
+      backend: 'wasm',
+      version: 'model-1',
+      voiceIds: ['voice-1'],
+      steps: 8,
+      compileMs: 1,
+      warmupMs: 1
+    });
+    await loading;
+
+    const prediction = engine.predictDuration('Second sentence.', 'voice-1', undefined, 1.2);
+    const message = worker.messages.at(-1)!;
+    expect(message).toMatchObject({
+      type: 'predict-duration',
+      text: 'Second sentence.',
+      voiceId: 'voice-1',
+      generation: 1,
+      speed: 1.2
+    });
+    worker.emit({ id: message.id, type: 'duration', predicted: 2.75 });
+    await expect(prediction).resolves.toBe(2.75);
+  });
 });
