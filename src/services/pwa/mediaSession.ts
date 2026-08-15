@@ -5,11 +5,11 @@
  * the screen on and something you use on a walk. Headphone buttons, the lock
  * screen, and car controls all route through here.
  *
- * A caveat worth stating plainly: MediaSession advertises *metadata and
- * controls*, it does not keep audio alive. Web Audio is suspended when the
- * screen locks on iOS, so on that platform these controls work while the app
- * is foregrounded and playback still stops on lock. Fixing that needs an
- * <audio> element as the output sink, which is a larger change than this.
+ * MediaSession advertises *metadata and controls*; it does not keep audio
+ * alive on its own. What does is the output sink — playback is routed through
+ * an <audio> element so the OS recognises it as media rather than as a page
+ * making noise. See services/audio/mediaElementSink.ts; without it these
+ * controls would appear and then stop working the moment the screen locked.
  */
 
 export interface MediaSessionHandlers {

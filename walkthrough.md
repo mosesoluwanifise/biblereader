@@ -19,19 +19,25 @@ yet built is marked as such. The V1 target is defined in
 | Reading position, auto-scroll, settings | Built |
 | PWA install, offline caching, MediaSession | Built |
 
-Speech runs on Supertonic ONNX in a worker, with `window.speechSynthesis`
-as a labelled interim tier while the model downloads.
+Speech runs on Supertonic ONNX in a worker. Playback waits for that engine
+rather than speaking on a platform voice first, and its output is routed
+through an `<audio>` element so the OS treats it as media — which is what
+earns background playback and the lock-screen transport.
 
 ## Known limitations
 
-- iOS suspends Web Audio when the screen locks, so lock-screen controls work
-  while the app is foregrounded but playback still stops on lock. Routing
-  output through an `<audio>` element would fix it.
+- Background playback is verified in the browser: audio flows through the
+  media element and `mediaSession.playbackState` tracks the transport. It has
+  not been measured against a physically locked handset, and iOS is the
+  likeliest place for it to fall short — that platform suspends Web Audio
+  aggressively. If the stream route is refused, the sink falls back to the
+  speakers, so audio keeps working with or without the lock-screen session.
 - Narration is generated per session and the model samples from a random
   prior, so two readings of the same verse differ. Quality varies slightly
   between draws.
 - Synthesis runs at roughly 1.3x realtime on four WASM threads. Slower
-  devices will fall behind and lean on the interim tier.
+  devices will fall behind; playback banks a lead-in and works ahead of the
+  playhead to absorb it.
 
 ## Defects fixed
 
