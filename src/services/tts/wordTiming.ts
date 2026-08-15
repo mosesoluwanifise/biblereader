@@ -74,6 +74,17 @@ export function interpolateWordTimings(text: string, totalSeconds: number, start
   return timings;
 }
 
+/** Normalizes passage text exactly as splitSentences does. */
+export function normalizePassageText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Counts the whitespace-delimited words used by highlighting and chunk metadata. */
+export function countWords(text: string): number {
+  const normalized = normalizePassageText(text);
+  return normalized ? normalized.split(' ').length : 0;
+}
+
 /**
  * Splits a passage into sentences for synthesis.
  *
@@ -82,7 +93,7 @@ export function interpolateWordTimings(text: string, totalSeconds: number, start
  * would put every word's position at the mercy of one estimate.
  */
 export function splitSentences(text: string, maxChars = 240): string[] {
-  const normalized = text.replace(/\s+/g, ' ').trim();
+  const normalized = normalizePassageText(text);
   if (normalized.length === 0) return [];
 
   const sentences: string[] = [];

@@ -5,7 +5,9 @@ import {
   weightOf,
   pauseWeightOf,
   offsetTimings,
-  softenAllCaps
+  softenAllCaps,
+  countWords,
+  normalizePassageText
 } from '../../src/services/tts/wordTiming';
 
 describe('interpolateWordTimings', () => {
@@ -141,6 +143,22 @@ describe('splitSentences', () => {
     const text = 'And God saw the light, that it was good: and God divided the light from the darkness.';
     const joined = splitSentences(text).join(' ');
     expect(joined.replace(/\s+/g, ' ')).toBe(text);
+  });
+
+  it('keeps its existing deterministic abbreviation behavior', () => {
+    expect(splitSentences('St. John met Dr. Luke.')).toEqual(['St.', 'John met Dr.', 'Luke.']);
+  });
+
+  it('handles punctuation-only fragments deterministically', () => {
+    expect(splitSentences('... ! ?')).toEqual(['...', '!', '?']);
+  });
+});
+
+describe('passage text helpers', () => {
+  it('shares normalization and word-count semantics with sentence splitting', () => {
+    expect(normalizePassageText('  In\n the   beginning  ')).toBe('In the beginning');
+    expect(countWords('  In\n the   beginning  ')).toBe(3);
+    expect(countWords('   ')).toBe(0);
   });
 });
 
