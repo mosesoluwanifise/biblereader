@@ -6,7 +6,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ReaderSettings } from './components/ReaderSettings';
 import { ChapterResult, TranslationCode, Verse } from './services/bible/types';
 import { VoiceOption } from './services/tts/types';
-import { PRESET_VOICES } from './services/tts/supertonicEngine';
+import { PRESET_VOICES, supertonicEngine } from './services/tts/supertonicEngine';
 import {
   getNextChapter,
   loadChapter,
@@ -92,6 +92,39 @@ export const App: React.FC = () => {
       active = false;
     };
   }, [book, chapter, translation, reloadToken]);
+
+  /**
+   * Warms the voice bundle while the reader is reading.
+   *
+   * Loading started only when play was pressed, so the entire 398 MB fetch and
+   * four graph compiles sat between the tap and the first word — the whole
+   * wait was in front of the user, doing nothing else. Starting it on idle
+   * moves that cost behind the reading they were already going to do; by the
+   * time play is pressed the engine is usually ready, and when it isn't the
+   * progress bar simply resumes from wherever it got to.
+   *
+   * Gated on the connection hints because 398 MB uninvited on a metered link
+   * is hostile. When the gate blocks, nothing is lost: pressing play loads it
+   * exactly as before.
+   */
+  useEffect(() => {
+    if (supertonicEngine.getStatus() !== 'idle') return;
+
+    const connection = (navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string };
+    }).connection;
+    if (connection?.saveData) return;
+    if (connection?.effectiveType && connection.effectiveType !== '4g') return;
+
+    const idle = window.requestIdleCallback ?? ((cb: IdleRequestCallback) => window.setTimeout(cb, 2000));
+    const cancel = window.cancelIdleCallback ?? window.clearTimeout;
+
+    // Progress is deliberately not reported here: a bar the reader never asked
+    // for reads as an error. Pressing play mid-warm picks up the same shared
+    // load promise and starts reporting from there.
+    const handle = idle(() => void supertonicEngine.load().catch(() => undefined));
+    return () => cancel(handle as number);
+  }, []);
 
   /** Verses only count as current when they belong to the displayed passage. */
   const currentVerses = useMemo(

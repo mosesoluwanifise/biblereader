@@ -65,6 +65,8 @@ export class SupertonicEngine {
   private version: string | null = null;
   private voiceIds: string[] = [];
   private currentGeneration = 1;
+  private progressListeners = new Set<(p: LoadProgress) => void>();
+  private lastProgress: LoadProgress | null = null;
 
   getStatus(): EngineStatus {
     return this.status;
@@ -145,17 +147,42 @@ export class SupertonicEngine {
     });
   }
 
-  /** Loads the bundle. Concurrent callers share one load. */
+  /**
+   * Loads the bundle. Concurrent callers share one load.
+   *
+   * Progress fans out to every caller rather than only the first. The app
+   * warms the bundle on idle without asking for progress; when the reader then
+   * presses play mid-warm, that second caller joins the same load and must
+   * still get a progress bar — otherwise it sits on "Preparing…" in silence
+   * for the remainder of a 398 MB fetch. Joiners are replayed the latest
+   * reading immediately, so the bar starts where the load actually is instead
+   * of at zero.
+   */
   async load(onProgress?: (p: LoadProgress) => void): Promise<void> {
     if (this.status === 'ready') return;
+
+    if (onProgress) {
+      this.progressListeners.add(onProgress);
+      if (this.lastProgress) onProgress(this.lastProgress);
+    }
     if (this.loadPromise) return this.loadPromise;
 
     this.status = 'loading';
-    this.loadPromise = this.send<void>({ type: 'load', modelBase: MODEL_BASE }, onProgress).catch((err) => {
-      this.status = 'failed';
-      this.loadPromise = null;
-      throw err;
-    });
+    const publish = (p: LoadProgress) => {
+      this.lastProgress = p;
+      for (const listener of this.progressListeners) listener(p);
+    };
+
+    this.loadPromise = this.send<void>({ type: 'load', modelBase: MODEL_BASE }, publish)
+      .catch((err) => {
+        this.status = 'failed';
+        this.loadPromise = null;
+        throw err;
+      })
+      .finally(() => {
+        this.progressListeners.clear();
+        this.lastProgress = null;
+      });
     return this.loadPromise;
   }
 
@@ -227,6 +254,8 @@ export class SupertonicEngine {
     this.status = 'idle';
     this.loadPromise = null;
     this.backend = null;
+    this.progressListeners.clear();
+    this.lastProgress = null;
   }
 }
 

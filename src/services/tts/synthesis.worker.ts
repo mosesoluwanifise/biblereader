@@ -152,12 +152,31 @@ async function load(id: number, base: string): Promise<void> {
   });
 
   const voiceIds: string[] = manifest.voiceStyles ?? [];
-  const total = GRAPHS.length + voiceIds.length + 1;
+
+  /**
+   * Progress is weighted by bytes, not by file count.
+   *
+   * Counting files put `vector_estimator` — 256 MB of the bundle's 398 — at
+   * one fifteenth of the bar, so "Downloading voice… 20%" sat motionless for
+   * most of the wait and then jumped. The manifest already records each file's
+   * size; using it makes the number mean what it says.
+   */
+  const sizes = new Map<string, number>(
+    ((manifest.files ?? []) as { path: string; bytes: number }[]).map((f) => [f.path, f.bytes])
+  );
+  const sizeOf = (path: string, fallback: number) => sizes.get(path) ?? fallback;
+
+  const total =
+    GRAPHS.reduce((sum, g) => sum + sizeOf(`onnx/${g}.onnx`, 1e7), 0) +
+    voiceIds.reduce((sum, v) => sum + sizeOf(`voice_styles/${v}.json`, 3e5), 0) +
+    sizeOf('onnx/unicode_indexer.json', 3e5);
+
   let loaded = 0;
-  const step = (label: string) => post({ id, type: 'progress', loaded: (loaded += 1), total, label });
+  const step = (label: string, bytes: number) =>
+    post({ id, type: 'progress', loaded: (loaded += bytes), total, label });
 
   indexer = await fetch(`${modelBase}/onnx/unicode_indexer.json`).then((r) => r.json());
-  step('tokenizer');
+  step('tokenizer', sizeOf('onnx/unicode_indexer.json', 3e5));
 
   /**
    * WASM first, WebGPU as fallback — the reverse of what R13 assumed.
@@ -174,32 +193,69 @@ async function load(id: number, base: string): Promise<void> {
    */
   const providers: ('wasm' | 'webgpu')[] = 'gpu' in navigator ? ['wasm', 'webgpu'] : ['wasm'];
 
-  for (const graph of GRAPHS) {
-    const url = `${modelBase}/onnx/${graph}.onnx`;
-    let session: ort.InferenceSession | null = null;
-    let lastError: unknown;
+  /**
+   * All four graphs at once, not one after another.
+   *
+   * Sequentially, each `create` fetched its weights and only then compiled
+   * them, so the network sat idle through every compile and the CPU sat idle
+   * through every fetch — four times over, across 398 MB. Overlapping them is
+   * the single largest saving available without touching the weights
+   * themselves, and it is what the U5 spike already did when it measured load
+   * time. Sessions are independent objects; nothing here is order-dependent.
+   */
+  await Promise.all(
+    GRAPHS.map(async (graph) => {
+      const url = `${modelBase}/onnx/${graph}.onnx`;
+      let session: ort.InferenceSession | null = null;
+      let lastError: unknown;
 
-    for (const provider of providers) {
-      try {
-        session = await ort.InferenceSession.create(url, { executionProviders: [provider] });
-        if (backend === null) backend = provider;
-        break;
-      } catch (err) {
-        lastError = err;
+      for (const provider of providers) {
+        try {
+          session = await ort.InferenceSession.create(url, { executionProviders: [provider] });
+          if (backend === null) backend = provider;
+          break;
+        } catch (err) {
+          lastError = err;
+        }
       }
-    }
-    if (!session) throw new Error(`Could not load ${graph}: ${(lastError as Error)?.message ?? 'unknown'}`);
-    sessions.set(graph, session);
-    step(graph);
-  }
+      if (!session) throw new Error(`Could not load ${graph}: ${(lastError as Error)?.message ?? 'unknown'}`);
+      sessions.set(graph, session);
+      step(graph, sizeOf(`onnx/${graph}.onnx`, 1e7));
+    })
+  );
 
-  for (const voiceId of voiceIds) {
-    const style = await fetch(`${modelBase}/voice_styles/${voiceId}.json`).then((r) => r.json());
-    styles.set(voiceId, { ttl: tensorFromStyle(style.style_ttl), dp: tensorFromStyle(style.style_dp) });
-    step(`voice ${voiceId}`);
-  }
+  // Ten styles at ~292 KB each: trivial bytes, but ten serial round trips is a
+  // second of pure latency on a slow link for no reason.
+  await Promise.all(
+    voiceIds.map(async (voiceId) => {
+      const style = await fetch(`${modelBase}/voice_styles/${voiceId}.json`).then((r) => r.json());
+      styles.set(voiceId, { ttl: tensorFromStyle(style.style_ttl), dp: tensorFromStyle(style.style_dp) });
+      step(`voice ${voiceId}`, sizeOf(`voice_styles/${voiceId}.json`, 3e5));
+    })
+  );
 
   post({ id, type: 'loaded', backend: backend ?? 'wasm', version: manifest.version ?? null, voiceIds });
+
+  /**
+   * Run the chain once and throw the audio away.
+   *
+   * Measured: the first synthesis after a load runs at 0.69x realtime where
+   * every later one runs at 1.07-1.29x — ONNX compiles its WASM kernels lazily
+   * on first execution of each graph. That one-off penalty landed on the first
+   * sentence of the passage, which is exactly where there is no buffered audio
+   * to absorb it, so it opened a deficit the rest of the chapter inherited.
+   *
+   * Paid here instead, behind the background warm-up, where nobody is waiting.
+   * The load task still owns the queue, so a play pressed mid-load waits for
+   * this — about a second, against a download an order of magnitude longer.
+   */
+  if (voiceIds.length > 0) {
+    try {
+      await synthesize(id, 'Amen.', voiceIds[0], 8, liveGeneration, DEFAULT_SPEED, false);
+    } catch {
+      /* Warm-up is an optimization; a failure here must not fail the load. */
+    }
+  }
 }
 
 async function synthesize(
@@ -208,7 +264,9 @@ async function synthesize(
   voiceId: string,
   steps: number,
   generation: number,
-  speed: number = DEFAULT_SPEED
+  speed: number = DEFAULT_SPEED,
+  /** False for the post-load warm-up, which discards its audio. */
+  emit = true
 ): Promise<void> {
   if (!indexer) throw new Error('Engine not loaded');
   assertLive(generation);
@@ -274,6 +332,7 @@ async function synthesize(
 
   assertLive(generation);
   const vocoded = await sessions.get('vocoder')!.run({ latent });
+  if (!emit) return;
   const source = vocoded.wav_tts.data as Float32Array;
 
   /**
