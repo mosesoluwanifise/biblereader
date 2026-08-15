@@ -187,11 +187,19 @@ export class SupertonicEngine {
     const audio = new Float32Array(result.audio);
     const duration = audio.length / result.sampleRate;
 
+    // Spread the words across the speech, not the whole buffer. The model pads
+    // each utterance with roughly half a second of silence at either end;
+    // interpolating over that put the highlight ahead of the voice at the
+    // start of every sentence and behind it by the end. The audio itself is
+    // untouched — that padding is the model's phrasing and is worth keeping.
+    const speechStart = result.speechStart ?? 0;
+    const speechDuration = result.speechDuration || duration;
+
     return {
       audio,
       sampleRate: result.sampleRate,
       duration,
-      words: interpolateWordTimings(trimmed, duration)
+      words: interpolateWordTimings(trimmed, speechDuration, speechStart)
     };
   }
 

@@ -143,6 +143,39 @@ describe('splitSentences', () => {
   });
 });
 
+describe('alignment against padded audio', () => {
+  it('places every word inside the speech, not the model padding', () => {
+    // The model returns ~0.5s of silence before speech and ~0.6s after. Spans
+    // interpolated across the whole buffer put the highlight ahead of the
+    // voice at the start and behind it at the end — 12-17% of every sentence.
+    const buffer = 3.52;
+    const speechStart = 0.4;
+    const speechDuration = 2.59;
+
+    const spans = interpolateWordTimings(
+      'In the beginning God created the heaven and the earth.',
+      speechDuration,
+      speechStart
+    );
+
+    expect(spans[0].start).toBeCloseTo(speechStart, 6);
+    expect(spans.at(-1)!.end).toBeCloseTo(speechStart + speechDuration, 6);
+
+    // Nothing may spill into either silence.
+    for (const span of spans) {
+      expect(span.start).toBeGreaterThanOrEqual(speechStart - 1e-9);
+      expect(span.end).toBeLessThanOrEqual(speechStart + speechDuration + 1e-9);
+      expect(span.end).toBeLessThan(buffer);
+    }
+  });
+
+  it('leaves no word highlighted before the first sound', () => {
+    const spans = interpolateWordTimings('Jesus wept.', 1.2, 0.45);
+    expect(spans[0].start).toBeGreaterThan(0);
+    expect(spans[0].start).toBeCloseTo(0.45, 6);
+  });
+});
+
 describe('offsetTimings', () => {
   it('shifts a sentence onto the passage timeline', () => {
     const shifted = offsetTimings(interpolateWordTimings('one two', 2), 5);

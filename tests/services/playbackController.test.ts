@@ -191,7 +191,7 @@ describe('sentence sequencing', () => {
     // deliberate pause after the previous one ends — never a gap that varies
     // with how long synthesis happened to take.
     const starts = context.startTimes;
-    const GAP = 0.22;
+    const GAP = 0; // model padding provides the spacing
     expect(starts).toHaveLength(3);
     for (let i = 1; i < starts.length; i += 1) {
       expect(starts[i] - starts[i - 1]).toBeCloseTo(0.1 + GAP, 5);

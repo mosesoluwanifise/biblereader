@@ -53,7 +53,17 @@ export type WorkerRequest =
 export type WorkerResponse =
   | { id: number; type: 'progress'; loaded: number; total: number; label: string }
   | { id: number; type: 'loaded'; backend: string; version: string | null; voiceIds: string[] }
-  | { id: number; type: 'audio'; audio: ArrayBuffer; sampleRate: number; predicted: number }
+  | {
+      id: number;
+      type: 'audio';
+      audio: ArrayBuffer;
+      sampleRate: number;
+      predicted: number;
+      /** Seconds of silence before speech begins in this buffer. */
+      speechStart: number;
+      /** Seconds of speech, excluding the model's leading and trailing pad. */
+      speechDuration: number;
+    }
   | { id: number; type: 'cancelled' }
   | { id: number; type: 'error'; message: string };
 
@@ -235,16 +245,15 @@ async function synthesize(
   /**
    * Locate the speech inside the utterance.
    *
-   * The model pads generously: measured across three sentences, speech
+   * The model pads generously — measured across three sentences, speech
    * occupied only ~72% of the buffer, with 0.40-0.57s of leading and
-   * 0.53-0.65s of trailing silence. Two things went wrong as a result. Word
-   * timings are interpolated across the returned duration, so the highlight
-   * began moving half a second before any sound and resolved half a second
-   * after the voice stopped — out of step on every sentence. And back-to-back
-   * scheduling left about 1.1s of dead air between sentences.
+   * 0.53-0.65s of trailing silence. That padding is *kept*: it is the model's
+   * own phrasing and sounds better than any gap inserted afterwards.
    *
-   * Trimming to the speech plus a short pad fixes the alignment at its source
-   * and lets playback set sentence spacing deliberately.
+   * What must not ignore it is word timing. Interpolating across the whole
+   * buffer put the highlight up to 0.57s ahead of the voice at the start of a
+   * sentence and 0.65s behind at the end. Reporting the bounds lets timings be
+   * spread over the speech alone while the audio plays unaltered.
    */
   function findSpeechBounds(buf: Float32Array, limit: number): [number, number] {
     let peak = 0;
@@ -268,17 +277,28 @@ async function synthesize(
     return [Math.max(0, start - padStart), Math.min(limit, end + padEnd)];
   }
 
-  // Drop the latent-grid padding first, then the model's own leading and
-  // trailing silence.
-  const gridLimit = Math.min(source.length, targetSamples);
-  const [from, to] = findSpeechBounds(source, gridLimit);
+  // Drop the latent-grid padding only. The model's own silence stays in the
+  // audio; the bounds below tell the caller where the speech sits inside it.
+  const length = Math.min(source.length, targetSamples);
+  const [speechFrom, speechTo] = findSpeechBounds(source, length);
 
   // Copy into a plain buffer so it can be transferred; ONNX output may sit in
   // shared WASM memory, which is not transferable.
-  const samples = new Float32Array(to - from);
-  samples.set(source.subarray(from, to));
+  const samples = new Float32Array(length);
+  samples.set(source.subarray(0, length));
 
-  post({ id, type: 'audio', audio: samples.buffer, sampleRate: SAMPLE_RATE, predicted }, [samples.buffer]);
+  post(
+    {
+      id,
+      type: 'audio',
+      audio: samples.buffer,
+      sampleRate: SAMPLE_RATE,
+      predicted,
+      speechStart: speechFrom / SAMPLE_RATE,
+      speechDuration: (speechTo - speechFrom) / SAMPLE_RATE
+    },
+    [samples.buffer]
+  );
 }
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
