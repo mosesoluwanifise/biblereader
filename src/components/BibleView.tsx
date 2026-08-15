@@ -1,7 +1,7 @@
 import React from 'react';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import { TranslationCode, Verse } from '../services/bible/types';
-import { BIBLE_BOOKS, getAvailableChapters, computeVerseOffsets } from '../services/bible/bibleService';
+import { computeVerseOffsets } from '../services/bible/bibleService';
 import { HighlightedVerse } from './HighlightedVerse';
 
 export type ChapterViewState =
@@ -15,8 +15,6 @@ interface BibleViewProps {
   chapter: number;
   state: ChapterViewState;
   onRetry: () => void;
-  onSelectBook: (b: string) => void;
-  onSelectChapter: (c: number) => void;
   activeWordIndex: number;
   onSelectVerseToRead?: (verseNumber: number) => void;
 }
@@ -31,59 +29,14 @@ export const BibleView: React.FC<BibleViewProps> = ({
   chapter,
   state,
   onRetry,
-  onSelectBook,
-  onSelectChapter,
   activeWordIndex,
   onSelectVerseToRead
 }) => {
-  const chapters = getAvailableChapters(book);
   const verses = state.status === 'loaded' ? state.verses : [];
   const verseOffsets = computeVerseOffsets(verses);
 
   return (
     <div className="reader-container">
-      <div className="nav-bar">
-        <div className="navigation-selectors">
-          <select
-            className="select-input"
-            value={book}
-            aria-label="Book"
-            onChange={(e) => {
-              onSelectBook(e.target.value);
-              onSelectChapter(1);
-            }}
-          >
-            <optgroup label="Old Testament">
-              {BIBLE_BOOKS.filter((b) => b.category === 'OT').map((b) => (
-                <option key={b.name} value={b.name}>
-                  {b.name}
-                </option>
-              ))}
-            </optgroup>
-            <optgroup label="New Testament">
-              {BIBLE_BOOKS.filter((b) => b.category === 'NT').map((b) => (
-                <option key={b.name} value={b.name}>
-                  {b.name}
-                </option>
-              ))}
-            </optgroup>
-          </select>
-
-          <select
-            className="select-input"
-            value={chapter}
-            aria-label="Chapter"
-            onChange={(e) => onSelectChapter(Number(e.target.value))}
-          >
-            {chapters.map((c) => (
-              <option key={c} value={c}>
-                Chapter {c}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
       <h2 className="chapter-title">
         {book} {chapter} ({translation})
       </h2>
