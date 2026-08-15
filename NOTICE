@@ -1,0 +1,18 @@
+Scripture Voice
+Copyright 2026 Moses Oluwanifise
+
+This product includes software developed by the Scripture Voice project.
+
+Third-party components
+----------------------
+
+Bible translations (King James Version, World English Bible, American
+Standard Version) are in the public domain.
+
+Supertonic speech-synthesis model weights are the work of Supertone, Inc.,
+distributed under the BigScience Open RAIL-M License. They are NOT covered by
+the Apache License above and are not distributed in this repository; the build
+script fetches them, and the licence, attribution, and change notices travel
+with the weights into public/models/. Use of the weights is subject to the
+use-based restrictions in Attachment A of that licence, reproduced in
+docs/TERMS.md.

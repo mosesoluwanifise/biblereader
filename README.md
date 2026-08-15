@@ -81,7 +81,8 @@ servers set them via `vite.config.ts`; static hosts need their own config.
 
 ## Licensing
 
-Application code in this repository is the project's own.
+Application code in this repository is licensed under the
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
 
 Bible translations (KJV, WEB, ASV) are public domain.
 
