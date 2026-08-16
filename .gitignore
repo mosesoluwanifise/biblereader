@@ -6,6 +6,11 @@ dist/
 dist-ssr/
 *.local
 
+# Scratch renders. Nothing in the repo writes here — make-thumbnail.ps1 emits
+# beside itself in docs/marketing/ — so this is a catch-all for exported
+# variants that should not be versioned.
+output/
+
 # Generated model assets (~138 MB, produced by scripts/build-model-assets.mjs)
 # Bible text under public/bibles/ IS committed — see KTD2 in the V1 plan.
 public/models/
@@ -16,8 +21,11 @@ playwright-report/
 test-results/
 .playwright/
 
-# Harness worktrees
+# Harness worktrees. Both locations: .worktrees/ holds a full checkout
+# including node_modules (~360 MB), so leaving it untracked put that one
+# `git add -A` away from being staged.
 .claude/worktrees/
+.worktrees/
 
 # Environment
 .env
