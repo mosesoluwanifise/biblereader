@@ -1,9 +1,12 @@
+import { getRuntimeCapabilities, type RuntimeProvider } from './runtimeProfile';
+
 export type DiagnosticPhase =
   | 'download'
   | 'compile'
   | 'warmup'
   | 'synthesis'
   | 'chunk'
+  | 'memory'
   | 'provider-fallback'
   | 'playback';
 
@@ -23,6 +26,14 @@ export interface TtsDiagnostic {
   underrunDurationMs?: number;
   cancellationLatencyMs?: number;
   platformInterruptionCount?: number;
+  chunkKind?: 'startup' | 'steady';
+  chunkChars?: number;
+  preparationOutcome?: 'synthesized' | 'cache-hit' | 'in-flight-adoption';
+  tapToFirstSpeechMs?: number;
+  preparedBytes?: number;
+  inFlightBytes?: number;
+  scheduledBytes?: number;
+  totalPcmBytes?: number;
   outcome?: 'start' | 'success' | 'failure';
 }
 
@@ -33,10 +44,21 @@ const MAX_METRIC_SAMPLES = 256;
 const synthesisDurations: number[] = [];
 const productionFactors: number[] = [];
 const cancellationLatencies: number[] = [];
+const startupSynthesisDurations: number[] = [];
+const steadySynthesisDurations: number[] = [];
+const startupChunkChars: number[] = [];
+const steadyChunkChars: number[] = [];
+const tapToFirstSpeechDurations: number[] = [];
 let minScheduledAheadSeconds: number | null = null;
 let maxUnderrunCount = 0;
 let maxUnderrunDurationMs = 0;
 let maxPlatformInterruptionCount = 0;
+let preparedCacheHits = 0;
+let inFlightAdoptions = 0;
+let peakPreparedBytes = 0;
+let peakInFlightBytes = 0;
+let peakScheduledBytes = 0;
+let peakTotalPcmBytes = 0;
 
 export interface NumericDistribution {
   count: number;
@@ -66,8 +88,19 @@ export interface TtsQualificationSnapshot {
     runtimeVersion: string | null;
   };
   synthesisMs: NumericDistribution;
+  startupSynthesisMs: NumericDistribution;
+  steadySynthesisMs: NumericDistribution;
+  startupChunkChars: NumericDistribution;
+  steadyChunkChars: NumericDistribution;
   /** Audio seconds produced per synthesis wall second. Higher is better. */
   productionFactor: NumericDistribution;
+  tapToFirstSpeechMs: NumericDistribution;
+  preparedCacheHits: number;
+  inFlightAdoptions: number;
+  peakPreparedBytes: number;
+  peakInFlightBytes: number;
+  peakScheduledBytes: number;
+  peakTotalPcmBytes: number;
   minScheduledAheadSeconds: number | null;
   underrunCount: number;
   underrunDurationMs: number;
@@ -94,14 +127,36 @@ export function recordTtsDiagnostic(event: Omit<TtsDiagnostic, 'at'> & { at?: nu
     underrunDurationMs: finite(event.underrunDurationMs),
     cancellationLatencyMs: finite(event.cancellationLatencyMs),
     platformInterruptionCount: finite(event.platformInterruptionCount),
+    chunkKind: event.chunkKind,
+    chunkChars: finite(event.chunkChars),
+    preparationOutcome: event.preparationOutcome,
+    tapToFirstSpeechMs: finite(event.tapToFirstSpeechMs),
+    preparedBytes: finite(event.preparedBytes),
+    inFlightBytes: finite(event.inFlightBytes),
+    scheduledBytes: finite(event.scheduledBytes),
+    totalPcmBytes: finite(event.totalPcmBytes),
     outcome: event.outcome
   };
   events.push(safe);
   if (safe.phase === 'chunk') {
     appendMetric(synthesisDurations, safe.durationMs);
     appendMetric(productionFactors, safe.realtimeFactor);
+    if (safe.chunkKind === 'startup') {
+      appendMetric(startupSynthesisDurations, safe.durationMs);
+      appendMetric(startupChunkChars, safe.chunkChars);
+    } else if (safe.chunkKind === 'steady') {
+      appendMetric(steadySynthesisDurations, safe.durationMs);
+      appendMetric(steadyChunkChars, safe.chunkChars);
+    }
   }
   appendMetric(cancellationLatencies, safe.cancellationLatencyMs);
+  appendMetric(tapToFirstSpeechDurations, safe.tapToFirstSpeechMs);
+  if (safe.preparationOutcome === 'cache-hit') preparedCacheHits += 1;
+  if (safe.preparationOutcome === 'in-flight-adoption') inFlightAdoptions += 1;
+  peakPreparedBytes = Math.max(peakPreparedBytes, safe.preparedBytes ?? 0);
+  peakInFlightBytes = Math.max(peakInFlightBytes, safe.inFlightBytes ?? 0);
+  peakScheduledBytes = Math.max(peakScheduledBytes, safe.scheduledBytes ?? 0);
+  peakTotalPcmBytes = Math.max(peakTotalPcmBytes, safe.totalPcmBytes ?? 0);
   if (safe.scheduledAheadSeconds !== undefined) {
     minScheduledAheadSeconds =
       minScheduledAheadSeconds === null
@@ -162,7 +217,18 @@ export function getTtsQualificationSnapshot(scope: typeof globalThis = globalThi
       runtimeVersion: runtime?.runtimeVersion ?? null
     },
     synthesisMs: distribution(synthesisDurations),
+    startupSynthesisMs: distribution(startupSynthesisDurations),
+    steadySynthesisMs: distribution(steadySynthesisDurations),
+    startupChunkChars: distribution(startupChunkChars),
+    steadyChunkChars: distribution(steadyChunkChars),
     productionFactor: distribution(productionFactors),
+    tapToFirstSpeechMs: distribution(tapToFirstSpeechDurations),
+    preparedCacheHits,
+    inFlightAdoptions,
+    peakPreparedBytes,
+    peakInFlightBytes,
+    peakScheduledBytes,
+    peakTotalPcmBytes,
     minScheduledAheadSeconds,
     underrunCount: maxUnderrunCount,
     underrunDurationMs: maxUnderrunDurationMs,
@@ -178,10 +244,21 @@ export function clearTtsDiagnostics(): void {
   synthesisDurations.length = 0;
   productionFactors.length = 0;
   cancellationLatencies.length = 0;
+  startupSynthesisDurations.length = 0;
+  steadySynthesisDurations.length = 0;
+  startupChunkChars.length = 0;
+  steadyChunkChars.length = 0;
+  tapToFirstSpeechDurations.length = 0;
   minScheduledAheadSeconds = null;
   maxUnderrunCount = 0;
   maxUnderrunDurationMs = 0;
   maxPlatformInterruptionCount = 0;
+  preparedCacheHits = 0;
+  inFlightAdoptions = 0;
+  peakPreparedBytes = 0;
+  peakInFlightBytes = 0;
+  peakScheduledBytes = 0;
+  peakTotalPcmBytes = 0;
 }
 
 function appendMetric(target: number[], value: number | undefined): void {
@@ -224,4 +301,3 @@ function percentile(sorted: number[], fraction: number): number | null {
 }
 
 export { MAX_EVENTS as MAX_TTS_DIAGNOSTICS };
-import { getRuntimeCapabilities, type RuntimeProvider } from './runtimeProfile';

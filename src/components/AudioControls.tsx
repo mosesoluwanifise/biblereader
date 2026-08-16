@@ -5,7 +5,9 @@ import { PlaybackState, type PlaybackModelPhase } from '../services/audio/playba
 
 type NarrationStatus =
   | 'provider-fallback'
-  | 'initial-download'
+  | 'download'
+  | 'compile'
+  | 'warmup'
   | 'rebuffering'
   | 'device-too-slow'
   | 'retry'
@@ -38,15 +40,17 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   onRestart,
   onOpenVoiceSelector
 }) => {
-  const isPlaying = playbackState === 'playing';
-  const isBusy = playbackState === 'preparing' || playbackState === 'rebuffering';
+  const isPlaying = playbackState === 'playing' || playbackState === 'rebuffering';
+  const isBusy = playbackState === 'preparing';
 
   const status = narrationStatus(playbackState, modelProgress, modelPhase, errorMessage);
   const isRetryable = status === 'retry' || status === 'device-too-slow';
 
   const statusLabel = {
     'provider-fallback': 'Trying a compatible audio engine…',
-    'initial-download': `Downloading voice model… ${Math.round((modelProgress ?? 0) * 100)}%`,
+    download: `Downloading voice model… ${Math.round((modelProgress ?? 0) * 100)}%`,
+    compile: 'Compiling voice model…',
+    warmup: 'Warming up narration…',
     rebuffering: 'Rebuffering narration…',
     'device-too-slow': errorMessage ?? 'This device is too slow for continuous narration.',
     retry: `${errorMessage} Retry available.`,
@@ -55,7 +59,13 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   }[status];
 
   return (
-    <div className="player-bar">
+    <div
+      className="player-bar"
+      role="region"
+      aria-label="Audio narration controls"
+      data-narration-status={status}
+      aria-busy={isBusy || status === 'rebuffering' || status === 'provider-fallback'}
+    >
       <div className="player-main">
         <div className="player-info">
           <span className={`player-passage ${errorMessage ? 'player-passage--error' : ''}`}>
@@ -69,7 +79,20 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
               <span>{voice.name}</span>
             </button>
 
-            {status !== 'idle' && <span className="player-upgrade" role="status" aria-live="polite">{statusLabel}</span>}
+            {status === 'download' ? (
+              <span
+                className="player-upgrade"
+                role="progressbar"
+                aria-label="Downloading voice model"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round((modelProgress ?? 0) * 100)}
+              >
+                {statusLabel}
+              </span>
+            ) : status !== 'idle' ? (
+              <span className="player-upgrade" role="status" aria-live="polite">{statusLabel}</span>
+            ) : null}
           </span>
         </div>
 
@@ -121,7 +144,9 @@ function narrationStatus(
   errorMessage: string | null
 ): NarrationStatus {
   if (modelPhase === 'provider-fallback') return 'provider-fallback';
-  if (modelProgress !== null) return 'initial-download';
+  if (modelPhase === 'warmup') return 'warmup';
+  if (modelPhase === 'compile') return 'compile';
+  if (modelPhase === 'download' || modelProgress !== null) return 'download';
   if (playbackState === 'rebuffering') return 'rebuffering';
   if (playbackState === 'device-too-slow') return 'device-too-slow';
   if (errorMessage) return 'retry';

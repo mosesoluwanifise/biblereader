@@ -55,6 +55,7 @@ class FakeEngine {
   runtime: EngineRuntimeInfo | null = runtime;
   synthesize = vi.fn(async (text: string) => result(text));
   predict = vi.fn(async () => 1);
+  cancel = vi.fn(() => 2);
 
   getRuntimeInfo() {
     return this.runtime;
@@ -68,6 +69,10 @@ class FakeEngine {
   async predictDuration(text: string) {
     this.calls.push(`predict:${text}`);
     return this.predict(text);
+  }
+
+  cancelInFlight() {
+    return this.cancel();
   }
 }
 
@@ -152,10 +157,26 @@ describe('SynthesisCoordinator', () => {
     const outcome = speculative.catch((error) => error);
     clock = 10;
     const foreground = coordinator.prepare(request({ priority: 'foreground' }, { chapter: 2 }));
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
     clock = 35;
     release(result('First sentence.'));
     expect(await outcome).toMatchObject({ name: 'PreparationCancelled', latencyMs: 25 });
     await foreground;
+  });
+
+  it('detaches a cancelled running task without letting its completion delete a same-key replacement', async () => {
+    let release!: (value: SynthesisResult) => void;
+    engine.synthesize.mockImplementationOnce((text) => new Promise((resolve) => (release = resolve)));
+    const sameRequest = request({ priority: 'speculative', slot: 'current' });
+    const stale = coordinator.prepare(sameRequest).catch((error) => error);
+    coordinator.cancelScope('speculative');
+    const replacement = coordinator.prepare(sameRequest);
+
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
+    release(result('First sentence.'));
+    expect(await stale).toBeInstanceOf(PreparationCancelled);
+    await expect(replacement).resolves.toBeDefined();
+    expect(engine.synthesize).toHaveBeenCalledTimes(2);
   });
 
   it('transport cancellation does not invalidate unrelated retained preparation', async () => {
@@ -165,12 +186,30 @@ describe('SynthesisCoordinator', () => {
     engine.synthesize.mockImplementationOnce((text) => new Promise((resolve) => (release = resolve)));
     const foreground = coordinator.prepare(request({ priority: 'foreground', slot: 'current' }, { chapter: 1 }));
     const outcome = foreground.catch((error) => error);
+    await vi.waitFor(() => expect(engine.synthesize).toHaveBeenCalledTimes(2));
     coordinator.cancelScope('foreground');
     release(result('First sentence.'));
     expect(await outcome).toBeInstanceOf(PreparationCancelled);
     const callsBeforeReuse = engine.synthesize.mock.calls.length;
     await expect(coordinator.prepare(nextRequest)).resolves.toBe(preparedNext);
     expect(engine.synthesize).toHaveBeenCalledTimes(callsBeforeReuse);
+  });
+
+  it('does not let cancelled stale PCM evict unrelated prepared audio', async () => {
+    engine.synthesize.mockImplementationOnce(async (text) => result(text, 10, 400_000));
+    const retained = request({ priority: 'speculative', slot: 'next' }, { chapter: 2 });
+    await coordinator.prepare(retained);
+
+    let release!: (value: SynthesisResult) => void;
+    engine.synthesize.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+    const stale = coordinator.prepare(request({ priority: 'foreground' })).catch((error) => error);
+    await vi.waitFor(() => expect(engine.synthesize).toHaveBeenCalledTimes(2));
+    coordinator.cancelScope('foreground');
+    release(result('First sentence.', 30, 400_000));
+
+    expect(await stale).toBeInstanceOf(PreparationCancelled);
+    expect(coordinator.getPreparedUsage()).toMatchObject({ entries: 1, seconds: 10 });
+    await expect(coordinator.prepare(retained)).resolves.toBeDefined();
   });
 
   it('stops stale packed work before isolated duration predictions', async () => {
@@ -211,6 +250,14 @@ describe('SynthesisCoordinator', () => {
     await coordinator.prepare(request());
     const changed = { [field]: value } as Partial<PassageSynthesisIdentity>;
     await coordinator.prepare(request({}, changed));
+    expect(engine.synthesize).toHaveBeenCalledTimes(2);
+  });
+
+  it('recomputes identity keys when a caller mutates a previously seen identity object', async () => {
+    const mutable = request();
+    await coordinator.prepare(mutable);
+    mutable.identity.chapter = 2;
+    await coordinator.prepare(mutable);
     expect(engine.synthesize).toHaveBeenCalledTimes(2);
   });
 
@@ -270,6 +317,48 @@ describe('SynthesisCoordinator', () => {
     await coordinator.prepare(request({}, { chapter: 1 }));
     await coordinator.prepare(request({ priority: 'speculative', slot: 'next' }, { chapter: 2 }));
     expect(coordinator.getPreparedUsage()).toMatchObject({ entries: 1, seconds: 20, bytes: 3_600_000 });
+  });
+
+  it('evicts prepared PCM when external scheduled usage consumes the shared budget', async () => {
+    engine.synthesize.mockImplementation(async (text) => result(text, 10, 400_000));
+    await coordinator.prepare(request());
+    expect(coordinator.getPreparedUsage().bytes).toBe(1_600_000);
+
+    coordinator.setScheduledUsage({ seconds: 20, bytes: 4_000_000 });
+    const usage = coordinator.getPcmUsage();
+    expect(usage.prepared).toEqual({ seconds: 0, bytes: 0 });
+    expect(usage.scheduled).toEqual({ seconds: 20, bytes: 4_000_000 });
+    expect(usage.total.bytes).toBeLessThanOrEqual(usage.limits.maxBytes);
+    expect(usage.peak.bytes).toBeLessThanOrEqual(usage.limits.maxBytes);
+  });
+
+  it('defers inference until retained scheduled PCM leaves room for a conservative reservation', async () => {
+    engine.predict.mockResolvedValueOnce(15);
+    coordinator.setScheduledUsage({ seconds: 20, bytes: 20 * 44_100 * 4 });
+
+    const prepared = coordinator.prepare(request());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.predict).toHaveBeenCalledTimes(1);
+    expect(engine.synthesize).not.toHaveBeenCalled();
+
+    coordinator.setScheduledUsage({ seconds: 0, bytes: 0 });
+    await expect(prepared).resolves.toBeDefined();
+    expect(engine.synthesize).toHaveBeenCalledTimes(1);
+    expect(coordinator.getPcmUsage().peak.seconds).toBeLessThanOrEqual(30);
+    expect(coordinator.getPcmUsage().peak.bytes).toBeLessThanOrEqual(Math.floor(5.3 * 1024 * 1024));
+  });
+
+  it('cancels a task blocked on PCM admission without launching inference', async () => {
+    engine.predict.mockResolvedValueOnce(15);
+    coordinator.setScheduledUsage({ seconds: 20, bytes: 20 * 44_100 * 4 });
+    const blocked = coordinator.prepare(request()).catch((error) => error);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    coordinator.cancelScope('foreground');
+    expect(await blocked).toBeInstanceOf(PreparationCancelled);
+    expect(engine.synthesize).not.toHaveBeenCalled();
   });
 
   it('clears a failed task and permits a clean retry', async () => {

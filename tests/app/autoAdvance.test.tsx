@@ -36,7 +36,8 @@ vi.mock('../../src/services/audio/playbackController', () => ({
   playbackController: controller,
   PlaybackController: class {},
   PREFETCH_LOW_WATER_SECONDS: 8,
-  PREFETCH_HIGH_WATER_SECONDS: 12
+  PREFETCH_HIGH_WATER_SECONDS: 12,
+  SPECULATIVE_PREPARATION_ENABLED: true
 }));
 
 import { App } from '../../src/App';

@@ -1,6 +1,7 @@
 import { defineConfig, devices, type Project } from '@playwright/test';
 
 const qualificationEnabled = process.env.SUPERTONIC_QUALIFY === '1';
+const longQualificationEnabled = qualificationEnabled && process.env.SUPERTONIC_LONG === '1';
 
 const projects: Project[] = [
   {
@@ -44,7 +45,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
-  timeout: qualificationEnabled ? 30 * 60_000 : 30_000,
+  timeout: longQualificationEnabled ? 100 * 60_000 : qualificationEnabled ? 30 * 60_000 : 30_000,
   expect: { timeout: qualificationEnabled ? 10 * 60_000 : 5_000 },
   use: {
     baseURL: 'http://localhost:3000',

@@ -8,21 +8,22 @@ import {
 } from '../tts/synthesisCoordinator';
 import type {
   PassageSynthesisIdentity,
+  PlannedSynthesisChunk,
   PreparedSynthesisChunk,
   WordTimestamp
 } from '../tts/types';
 import { MediaElementSink } from './mediaElementSink';
 
 export type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'rebuffering' | 'device-too-slow';
-export type PlaybackModelPhase = 'provider-fallback';
+export type PlaybackModelPhase = 'download' | 'compile' | 'warmup' | 'provider-fallback';
 export const PREFETCH_LOW_WATER_SECONDS = 8;
 export const PREFETCH_HIGH_WATER_SECONDS = 12;
+export const SPECULATIVE_PREPARATION_ENABLED = import.meta.env.VITE_SUPERTONIC_SPECULATIVE_PREPARATION !== '0';
 
 export type PassageIdentityInput = Omit<
   PassageSynthesisIdentity,
   'provider' | 'steps' | 'modelVersion' | 'runtimeVersion'
-> &
-  Partial<Pick<PassageSynthesisIdentity, 'provider' | 'steps' | 'modelVersion' | 'runtimeVersion'>>;
+>;
 
 export interface PlaybackCallbacks {
   onWord?: (globalWordIndex: number) => void;
@@ -36,8 +37,9 @@ export interface PlaybackCallbacks {
 }
 
 interface ScheduledChunk {
-  prepared: PreparedSynthesisChunk;
+  chunk: PlannedSynthesisChunk;
   buffer: AudioBuffer;
+  pcmBytes: number;
   words: ScheduledWord[];
   startAt: number;
   endAt: number;
@@ -52,12 +54,20 @@ interface CoordinatorPort {
   prepare(request: SynthesisPreparationRequest): Promise<PreparedSynthesisChunk>;
   cancelScope(scope: 'foreground' | 'speculative'): void;
   clearPrepared(slot?: 'current' | 'next'): void;
+  setScheduledUsage?(usage: { seconds: number; bytes: number }): void;
 }
 
 class DeviceTooSlow extends Error {
   constructor() {
     super('This device cannot synthesize narration fast enough for continuous playback. Please retry.');
     this.name = 'DeviceTooSlow';
+  }
+}
+
+class RuntimeFallbackRequired extends Error {
+  constructor() {
+    super('The active narration runtime is not sustainable');
+    this.name = 'RuntimeFallbackRequired';
   }
 }
 
@@ -80,13 +90,20 @@ export class PlaybackController {
   private underrunDurationMs = 0;
   private slowUnderrunEvidence = 0;
   private platformInterruptionCount = 0;
+  private platformInterruptionActive = false;
   private bufferBand: 'low' | 'middle' | 'high' | null = null;
   private passageIncomplete = false;
   private requiredSynthesisGeneration: number | null = null;
+  private pausedFrom: 'playing' | 'rebuffering' = 'playing';
+  private fallbackAttempted = false;
+  private tapStartedAt: number | null = null;
+  private firstSpeechAt: number | null = null;
+  private firstSpeechRecorded = false;
 
   private static readonly BUFFER_HORIZON_SECONDS = 20;
   private static readonly UNDERRUN_TOLERANCE_SECONDS = 0.02;
   private static readonly DEVICE_TOO_SLOW_UNDERRUNS = 2;
+  private static readonly SUSTAINABLE_PRODUCTION_FACTOR = 1.25;
 
   constructor(private readonly coordinator: CoordinatorPort = synthesisCoordinator) {}
 
@@ -108,6 +125,7 @@ export class PlaybackController {
     identityInput: PassageIdentityInput,
     slot: 'current' | 'next' = 'current'
   ): Promise<PreparedSynthesisChunk | null> {
+    if (!SPECULATIVE_PREPARATION_ENABLED) return null;
     const runtime = supertonicEngine.getRuntimeInfo();
     if (!supertonicEngine.isReady() || !runtime) return null;
     const identity = completeIdentity(identityInput, runtime);
@@ -144,6 +162,7 @@ export class PlaybackController {
     const generation = this.generation;
     this.callbacks = callbacks;
     this.activeRequestKey = requestKey;
+    this.tapStartedAt = performance.now();
 
     const context = this.ensureContext();
     void context.resume();
@@ -177,15 +196,18 @@ export class PlaybackController {
   ): Promise<void> {
     try {
       if (!supertonicEngine.isReady()) {
-        await supertonicEngine.load((progress) => {
+        try {
+          await supertonicEngine.load((progress) => {
+            if (generation === this.generation) {
+              this.callbacks.onModelProgress?.(progress.total > 0 ? progress.loaded / progress.total : null);
+              this.callbacks.onModelPhase?.(playbackPhase(progress.label));
+            }
+          });
+        } finally {
           if (generation === this.generation) {
-            this.callbacks.onModelProgress?.(progress.loaded / progress.total);
-            this.callbacks.onModelPhase?.(progress.label === 'provider-fallback' ? 'provider-fallback' : null);
+            this.callbacks.onModelProgress?.(null);
+            this.callbacks.onModelPhase?.(null);
           }
-        });
-        if (generation === this.generation) {
-          this.callbacks.onModelProgress?.(null);
-          this.callbacks.onModelPhase?.(null);
         }
       }
       if (generation !== this.generation) return;
@@ -229,7 +251,11 @@ export class PlaybackController {
           this.playbackStarted = true;
           this.setState('playing');
           this.startWordClock(generation);
-        } else if (this.state === 'rebuffering') this.setState('playing');
+        } else if (this.state === 'rebuffering') {
+          this.setState('playing');
+        } else if (this.state === 'paused' && this.pausedFrom === 'rebuffering') {
+          this.pausedFrom = 'playing';
+        }
       }
       this.passageIncomplete = false;
 
@@ -244,7 +270,46 @@ export class PlaybackController {
         });
       }
       if (generation !== this.generation || error instanceof PreparationCancelled) return;
+      if (error instanceof RuntimeFallbackRequired) {
+        if (await this.tryRuntimeFallback(generation)) {
+          await this.run(text, voiceId, startWordOffset, speed, suppliedIdentity, generation);
+          return;
+        }
+        this.fail(new DeviceTooSlow(), 'device-too-slow');
+        return;
+      }
       this.fail(error as Error, error instanceof DeviceTooSlow ? 'device-too-slow' : 'idle');
+    }
+  }
+
+  private async tryRuntimeFallback(generation: number): Promise<boolean> {
+    if (this.fallbackAttempted || generation !== this.generation) return false;
+    this.fallbackAttempted = true;
+    this.coordinator.cancelScope('foreground');
+    this.coordinator.clearPrepared();
+    this.stopSources();
+    this.stopWordClock();
+    this.sink?.pause();
+    this.resetMetrics(true);
+    this.setState('preparing');
+    this.callbacks.onModelPhase?.('provider-fallback');
+
+    try {
+      await supertonicEngine.fallbackFromActiveProvider((progress) => {
+        if (generation !== this.generation) return;
+        this.callbacks.onModelProgress?.(progress.total > 0 ? progress.loaded / progress.total : null);
+        this.callbacks.onModelPhase?.(playbackPhase(progress.label));
+      });
+      if (generation !== this.generation) return false;
+      this.sink?.resume();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (generation === this.generation) {
+        this.callbacks.onModelProgress?.(null);
+        this.callbacks.onModelPhase?.(null);
+      }
     }
   }
 
@@ -267,13 +332,18 @@ export class PlaybackController {
       });
     }
     if (hadTimeline && context.state !== 'running' && this.state !== 'paused') {
-      this.platformInterruptionCount += 1;
-      recordTtsDiagnostic({
-        phase: 'playback',
-        platformInterruptionCount: this.platformInterruptionCount,
-        scheduledAheadSeconds: Math.max(0, expectedAt - context.currentTime),
-        outcome: 'failure'
-      });
+      if (!this.platformInterruptionActive) {
+        this.platformInterruptionActive = true;
+        this.platformInterruptionCount += 1;
+        recordTtsDiagnostic({
+          phase: 'playback',
+          platformInterruptionCount: this.platformInterruptionCount,
+          scheduledAheadSeconds: Math.max(0, expectedAt - context.currentTime),
+          outcome: 'failure'
+        });
+      }
+    } else if (context.state === 'running') {
+      this.platformInterruptionActive = false;
     }
     if (
       hadTimeline &&
@@ -282,7 +352,9 @@ export class PlaybackController {
     ) {
       this.underrunCount += 1;
       this.underrunDurationMs += lateBy * 1000;
-      if (prepared.productionFactor < 1) this.slowUnderrunEvidence += 1;
+      if (prepared.productionFactor < PlaybackController.SUSTAINABLE_PRODUCTION_FACTOR) {
+        this.slowUnderrunEvidence += 1;
+      }
       recordTtsDiagnostic({
         phase: 'playback',
         underrunCount: this.underrunCount,
@@ -295,6 +367,7 @@ export class PlaybackController {
         this.underrunCount >= PlaybackController.DEVICE_TOO_SLOW_UNDERRUNS &&
         this.slowUnderrunEvidence >= PlaybackController.DEVICE_TOO_SLOW_UNDERRUNS
       ) {
+        if (!this.fallbackAttempted) throw new RuntimeFallbackRequired();
         throw new DeviceTooSlow();
       }
     }
@@ -315,8 +388,21 @@ export class PlaybackController {
     source.connect(this.ensureSink().node);
     source.start(startAt);
     const endAt = startAt + buffer.duration;
-    this.scheduled.push({ prepared, buffer, words: scheduledWords(prepared), startAt, endAt, source });
+    const words = scheduledWords(prepared);
+    this.scheduled.push({
+      chunk: prepared.chunk,
+      buffer,
+      pcmBytes: samples.byteLength,
+      words,
+      startAt,
+      endAt,
+      source
+    });
+    if (this.firstSpeechAt === null) {
+      this.firstSpeechAt = startAt + (words[0]?.start ?? prepared.speechStart ?? 0);
+    }
     this.nextStartAt = endAt;
+    this.reportScheduledUsage();
     if (generation === this.generation) this.observeLowWater();
   }
 
@@ -354,6 +440,17 @@ export class PlaybackController {
     const tick = () => {
       if (generation !== this.generation || !this.context) return;
       const now = this.context.currentTime;
+      if (this.context.state === 'running') this.platformInterruptionActive = false;
+      if (
+        !this.firstSpeechRecorded &&
+        this.firstSpeechAt !== null &&
+        this.tapStartedAt !== null &&
+        this.context.state === 'running' &&
+        now >= this.firstSpeechAt
+      ) {
+        this.firstSpeechRecorded = true;
+        recordTapToFirstSpeech(Math.max(0, performance.now() - this.tapStartedAt));
+      }
       const scheduledAhead = Math.max(0, this.nextStartAt - now);
       this.notifyBuffer(scheduledAhead);
       if (
@@ -378,12 +475,14 @@ export class PlaybackController {
           this.callbacks.onWord?.(globalWord);
         }
       }
-      if (this.scheduled.length > 4) {
-        this.scheduled = this.scheduled.filter((entry) => {
-          if (entry.endAt > now - 1) return true;
-          entry.source.disconnect();
-          return false;
-        });
+      const retained = this.scheduled.filter((entry) => {
+        if (entry.endAt > now) return true;
+        entry.source.disconnect();
+        return false;
+      });
+      if (retained.length !== this.scheduled.length) {
+        this.scheduled = retained;
+        this.reportScheduledUsage();
       }
       this.rafId = requestAnimationFrame(tick);
     };
@@ -392,8 +491,8 @@ export class PlaybackController {
 
   private reportAudibleSegments(entry: ScheduledChunk, elapsed: number): void {
     let wordCursor = 0;
-    for (const segment of entry.prepared.chunk.segments) {
-      const firstWord = entry.prepared.words[wordCursor];
+    for (const segment of entry.chunk.segments) {
+      const firstWord = entry.words[wordCursor];
       const audibleAt = firstWord?.start ?? 0;
       if (elapsed >= audibleAt && !this.reportedSentences.has(segment.sentenceIndex)) {
         this.reportedSentences.add(segment.sentenceIndex);
@@ -416,10 +515,12 @@ export class PlaybackController {
   }
 
   async pause(): Promise<void> {
-    if (this.state !== 'playing' || !this.context) return;
+    if ((this.state !== 'playing' && this.state !== 'rebuffering') || !this.context) return;
+    this.pausedFrom = this.state;
     await this.context.suspend();
     this.sink?.pause();
     this.stopWordClock();
+    this.platformInterruptionActive = false;
     this.setState('paused');
   }
 
@@ -427,7 +528,7 @@ export class PlaybackController {
     if (this.state !== 'paused' || !this.context) return;
     await this.context.resume();
     this.sink?.resume();
-    this.setState('playing');
+    this.setState(this.pausedFrom);
     this.startWordClock(this.generation);
   }
 
@@ -484,9 +585,19 @@ export class PlaybackController {
     }
     this.scheduled = [];
     this.nextStartAt = 0;
+    this.reportScheduledUsage();
   }
 
-  private resetMetrics(): void {
+  private reportScheduledUsage(): void {
+    this.coordinator.setScheduledUsage?.({
+      seconds: this.scheduled.reduce((total, entry) => total + entry.buffer.duration, 0),
+      bytes: this.scheduled.reduce((total, entry) => total + entry.pcmBytes, 0)
+    });
+  }
+
+  private resetMetrics(preserveFallbackAttempt = false): void {
+    const fallbackAttempted = this.fallbackAttempted;
+    const tapStartedAt = this.tapStartedAt;
     this.nextStartAt = 0;
     this.scheduled = [];
     this.reportedSentences.clear();
@@ -497,10 +608,29 @@ export class PlaybackController {
     this.underrunDurationMs = 0;
     this.slowUnderrunEvidence = 0;
     this.platformInterruptionCount = 0;
+    this.platformInterruptionActive = false;
     this.bufferBand = null;
     this.passageIncomplete = false;
     this.requiredSynthesisGeneration = null;
+    this.pausedFrom = 'playing';
+    this.fallbackAttempted = preserveFallbackAttempt ? fallbackAttempted : false;
+    this.tapStartedAt = preserveFallbackAttempt ? tapStartedAt : null;
+    this.firstSpeechAt = null;
+    this.firstSpeechRecorded = false;
   }
+}
+
+function playbackPhase(label: string): PlaybackModelPhase {
+  if (label === 'provider-fallback') return 'provider-fallback';
+  if (label === 'warmup') return 'warmup';
+  if (label === 'duration_predictor' || label === 'text_encoder' || label === 'vector_estimator' || label === 'vocoder') {
+    return 'compile';
+  }
+  return 'download';
+}
+
+function recordTapToFirstSpeech(durationMs: number): void {
+  recordTtsDiagnostic({ phase: 'playback', tapToFirstSpeechMs: durationMs, outcome: 'success' });
 }
 
 function scheduledWords(prepared: PreparedSynthesisChunk): ScheduledWord[] {

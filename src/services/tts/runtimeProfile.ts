@@ -1,13 +1,18 @@
+import ortPackage from '../../../node_modules/onnxruntime-web/package.json';
+
 export type RuntimeProvider = 'webgpu' | 'wasm';
 
-export const ORT_RUNTIME_VERSION = '1.18.0';
-const PROFILE_SCHEMA_VERSION = 1;
+export const ORT_RUNTIME_VERSION = ortPackage.version;
+const PROFILE_SCHEMA_VERSION = 2;
 const PROFILE_STORAGE_KEY = 'scripture-voice:supertonic-runtime-profile';
 
 export interface RuntimeCapabilities {
   webgpu: boolean;
   crossOriginIsolated: boolean;
   hardwareConcurrency: number;
+  wasmThreads: number;
+  browserFamily: 'chromium' | 'firefox' | 'safari' | 'other';
+  browserMajor: number | null;
 }
 
 export interface RuntimeProfile {
@@ -26,12 +31,68 @@ export interface SessionFactory<T> {
   release(session: T): Promise<void>;
 }
 
+export class InitializationAssetsError extends Error {
+  constructor(public readonly cause: unknown) {
+    super((cause as Error)?.message ?? 'Supertonic asset initialization failed');
+    this.name = 'InitializationAssetsError';
+  }
+}
+
+/** Joins independent asset/session initialization without orphaning a fulfilled session set. */
+export async function joinAtomicInitialization<T, A>(
+  sessionPromise: Promise<{ provider: RuntimeProvider; sessions: Map<string, T> }>,
+  assetsPromise: Promise<A>,
+  release: (session: T) => Promise<void>
+): Promise<{ selected: { provider: RuntimeProvider; sessions: Map<string, T> }; assets: A }> {
+  const [sessionResult, assetsResult] = await Promise.allSettled([sessionPromise, assetsPromise]);
+  if (assetsResult.status === 'rejected') {
+    if (sessionResult.status === 'fulfilled') {
+      await Promise.allSettled([...sessionResult.value.sessions.values()].map(release));
+    }
+    throw new InitializationAssetsError(assetsResult.reason);
+  }
+  if (sessionResult.status === 'rejected') throw sessionResult.reason;
+  return { selected: sessionResult.value, assets: assetsResult.value };
+}
+
+/** Warm-up is part of provider selection; a provider is unusable until it passes. */
+export async function warmOrReleaseSessionSet<T>(
+  sessions: Iterable<T>,
+  warmup: () => Promise<void>,
+  release: (session: T) => Promise<void>
+): Promise<void> {
+  try {
+    await warmup();
+  } catch (error) {
+    await Promise.allSettled([...sessions].map(release));
+    throw error;
+  }
+}
+
 export function getRuntimeCapabilities(scope: typeof globalThis = globalThis): RuntimeCapabilities {
+  const hardwareConcurrency = Math.max(1, scope.navigator.hardwareConcurrency || 1);
+  const browser = browserIdentity(scope.navigator.userAgent ?? '');
   return {
     webgpu: 'gpu' in scope.navigator,
     crossOriginIsolated: scope.crossOriginIsolated === true,
-    hardwareConcurrency: Math.max(1, scope.navigator.hardwareConcurrency || 1)
+    hardwareConcurrency,
+    wasmThreads: scope.crossOriginIsolated === true ? Math.min(4, Math.ceil(hardwareConcurrency / 2)) : 1,
+    browserFamily: browser.family,
+    browserMajor: browser.major
   };
+}
+
+export function browserIdentity(userAgent: string): {
+  family: RuntimeCapabilities['browserFamily'];
+  major: number | null;
+} {
+  const chromium = userAgent.match(/(?:Edg|HeadlessChrome|Chrome)\/(\d+)/);
+  if (chromium) return { family: 'chromium', major: Number(chromium[1]) };
+  const firefox = userAgent.match(/Firefox\/(\d+)/);
+  if (firefox) return { family: 'firefox', major: Number(firefox[1]) };
+  const safari = userAgent.match(/Version\/(\d+).+Safari\//);
+  if (safari) return { family: 'safari', major: Number(safari[1]) };
+  return { family: 'other', major: null };
 }
 
 export function compatibleProfile(
@@ -47,6 +108,9 @@ export function compatibleProfile(
     profile.capabilities.webgpu !== capabilities.webgpu ||
     profile.capabilities.crossOriginIsolated !== capabilities.crossOriginIsolated ||
     profile.capabilities.hardwareConcurrency !== capabilities.hardwareConcurrency ||
+    profile.capabilities.wasmThreads !== capabilities.wasmThreads ||
+    profile.capabilities.browserFamily !== capabilities.browserFamily ||
+    profile.capabilities.browserMajor !== capabilities.browserMajor ||
     (profile.provider !== 'wasm' && profile.provider !== 'webgpu') ||
     profile.provider === 'webgpu' && !capabilities.webgpu ||
     typeof profile.modelVersion !== 'string'

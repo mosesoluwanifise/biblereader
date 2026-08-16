@@ -29,6 +29,7 @@ interface EnginePort {
     speed?: number
   ): Promise<SynthesisResult>;
   predictDuration(text: string, voiceId?: string, generation?: number, speed?: number): Promise<number>;
+  cancelInFlight?(): number;
 }
 
 interface Task {
@@ -45,8 +46,21 @@ interface Task {
 
 interface CacheEntry {
   key: string;
-  slot: PreparationSlot;
   value: PreparedSynthesisChunk;
+}
+
+export interface PcmUsage {
+  seconds: number;
+  bytes: number;
+}
+
+export interface PcmUsageSnapshot {
+  prepared: PcmUsage;
+  inFlight: PcmUsage;
+  scheduled: PcmUsage;
+  total: PcmUsage;
+  peak: PcmUsage;
+  limits: { maxSeconds: number; maxBytes: number };
 }
 
 export class PreparationCancelled extends Error {
@@ -63,7 +77,10 @@ const MAX_PREPARED_BYTES = Math.floor(5.3 * 1024 * 1024);
 export class SynthesisCoordinator {
   private readonly tasks = new Map<string, Task>();
   private readonly cache = new Map<PreparationSlot, CacheEntry>();
-  private readonly identityKeys = new WeakMap<PassageSynthesisIdentity, string>();
+  private inFlightUsage: PcmUsage = emptyUsage();
+  private scheduledUsage: PcmUsage = emptyUsage();
+  private peakUsage: PcmUsage = emptyUsage();
+  private readonly capacityWaiters = new Set<() => void>();
   private running = false;
   private sequence = 0;
   private selectedPassage: string | null = null;
@@ -78,24 +95,28 @@ export class SynthesisCoordinator {
       return Promise.reject(new Error('Speculative synthesis is bounded to a passage first chunk'));
     }
     this.assertRuntimeIdentity(request.identity);
-    const passageKey = this.identityKey(request.identity);
+    const passageKey = serializeIdentity(request.identity);
     const key = `${passageKey}\u0000${request.chunk.sourceStart}\u0000${request.chunk.sourceEnd}\u0000${request.chunk.text}`;
-    const cached = [...this.cache.values()].find((entry) => entry.key === key);
+    const cached = [...this.cache.entries()].find(([, entry]) => entry.key === key);
     if (cached) {
+      const [cachedSlot, cachedEntry] = cached;
+      this.recordPreparation(request, 'cache-hit');
       if (request.priority === 'foreground') {
         this.selectForeground(passageKey, key);
-        if (cached.slot === 'next') {
+        if (cachedSlot === 'next') {
           this.cache.delete('next');
-          this.cache.set('current', { ...cached, slot: 'current' });
+          this.cache.set('current', cachedEntry);
         }
       }
-      return Promise.resolve(cached.value);
+      this.refreshUsage();
+      return Promise.resolve(cachedEntry.value);
     }
 
     // Adoption happens before cancellation so foreground Play can reuse an
     // identical speculative first chunk already queued or running.
     const existing = this.tasks.get(key);
     if (existing) {
+      this.recordPreparation(request, 'in-flight-adoption');
       if (request.priority === 'foreground') {
         existing.request.priority = 'foreground';
         existing.request.slot = request.slot ?? 'current';
@@ -129,15 +150,14 @@ export class SynthesisCoordinator {
   }
 
   cancelScope(scope: SynthesisPriority): void {
-    const at = this.now();
-    for (const task of this.tasks.values()) {
-      if (task.request.priority === scope && task.cancelledAt === undefined) task.cancelledAt = at;
-    }
+    this.cancelTasks((task) => task.request.priority === scope);
   }
 
   clearPrepared(slot?: PreparationSlot): void {
     if (slot) this.cache.delete(slot);
     else this.cache.clear();
+    this.refreshUsage();
+    this.notifyCapacityWaiters();
   }
 
   getPreparedUsage(): { entries: number; seconds: number; bytes: number } {
@@ -149,23 +169,50 @@ export class SynthesisCoordinator {
     };
   }
 
+  setScheduledUsage(usage: PcmUsage): void {
+    this.scheduledUsage = sanitizeUsage(usage);
+    this.enforcePcmBudget();
+    this.refreshUsage();
+    this.notifyCapacityWaiters();
+  }
+
+  getPcmUsage(): PcmUsageSnapshot {
+    const prepared = this.preparedUsage();
+    const total = addUsage(prepared, this.inFlightUsage, this.scheduledUsage);
+    return {
+      prepared,
+      inFlight: { ...this.inFlightUsage },
+      scheduled: { ...this.scheduledUsage },
+      total,
+      peak: { ...this.peakUsage },
+      limits: { maxSeconds: MAX_PREPARED_SECONDS, maxBytes: MAX_PREPARED_BYTES }
+    };
+  }
+
   private selectForeground(passageKey: string, adoptedKey: string): void {
     this.selectedPassage = passageKey;
-    const at = this.now();
-    for (const task of this.tasks.values()) {
-      if (task.key !== adoptedKey && task.passageKey !== passageKey && task.cancelledAt === undefined) {
-        task.cancelledAt = at;
-      }
-    }
+    this.cancelTasks((task) => task.key !== adoptedKey && task.passageKey !== passageKey);
   }
 
   private selectSpeculative(selectedKey: string): void {
+    this.cancelTasks((task) => task.key !== selectedKey && task.request.priority === 'speculative');
+  }
+
+  private cancelTasks(predicate: (task: Task) => boolean): void {
     const at = this.now();
-    for (const task of this.tasks.values()) {
-      if (task.key !== selectedKey && task.request.priority === 'speculative' && task.cancelledAt === undefined) {
-        task.cancelledAt = at;
+    let cancelEngine = false;
+    for (const task of [...this.tasks.values()]) {
+      if (!predicate(task) || task.cancelledAt !== undefined) continue;
+      task.cancelledAt = at;
+      if (task.state === 'running') {
+        this.deleteTask(task);
+        cancelEngine = true;
+      } else {
+        this.finishCancelled(task);
       }
     }
+    if (cancelEngine) this.engine.cancelInFlight?.();
+    this.notifyCapacityWaiters();
   }
 
   private async pump(): Promise<void> {
@@ -190,11 +237,16 @@ export class SynthesisCoordinator {
           if (task.request.slot && task.request.chunk.kind === 'startup') {
             this.retain(task.key, task.request.slot, prepared);
           }
-          this.tasks.delete(task.key);
+          this.deleteTask(task);
           task.resolve(prepared);
         } catch (error) {
-          this.tasks.delete(task.key);
-          task.reject(error as Error);
+          this.inFlightUsage = emptyUsage();
+          this.refreshUsage();
+          if (task.cancelledAt !== undefined) this.finishCancelled(task);
+          else {
+            this.deleteTask(task);
+            task.reject(error as Error);
+          }
         }
       }
     } finally {
@@ -210,6 +262,8 @@ export class SynthesisCoordinator {
 
   private async execute(task: Task, startedAt: number): Promise<PreparedSynthesisChunk> {
     const request = task.request;
+    const admission = this.beginPcmAdmission(task);
+    if (admission) await admission;
     const result = await this.engine.synthesizeSentence(
       request.chunk.text,
       request.identity.voiceId,
@@ -217,7 +271,12 @@ export class SynthesisCoordinator {
       undefined,
       request.identity.speed
     );
+    // A worker response can race with its cancellation message. Discard stale
+    // PCM before it participates in accounting or evicts still-valid cache.
     this.assertTaskLive(task);
+    this.inFlightUsage = { seconds: result.duration, bytes: result.audio.byteLength };
+    this.enforcePcmBudget();
+    this.refreshUsage();
     const synthesisFinishedAt = this.now();
     let words = result.words;
     let timingPredictionMs = 0;
@@ -247,9 +306,16 @@ export class SynthesisCoordinator {
       runtimeVersion: request.identity.runtimeVersion,
       audioSeconds: result.duration,
       realtimeFactor: productionFactor,
+      chunkKind: request.chunk.kind,
+      chunkChars: request.chunk.text.length,
+      preparationOutcome: 'synthesized',
+      preparedBytes: this.preparedUsage().bytes,
+      inFlightBytes: this.inFlightUsage.bytes,
+      scheduledBytes: this.scheduledUsage.bytes,
+      totalPcmBytes: this.getPcmUsage().total.bytes,
       outcome: 'success'
     });
-    return {
+    const prepared = {
       ...result,
       words,
       chunk: request.chunk,
@@ -257,11 +323,18 @@ export class SynthesisCoordinator {
       timingPredictionMs,
       productionFactor
     };
+    this.inFlightUsage = emptyUsage();
+    this.refreshUsage();
+    return prepared;
   }
 
   private finishCancelled(task: Task): void {
-    this.tasks.delete(task.key);
+    this.deleteTask(task);
     task.reject(this.cancellationError(task));
+  }
+
+  private deleteTask(task: Task): void {
+    if (this.tasks.get(task.key) === task) this.tasks.delete(task.key);
   }
 
   private assertTaskLive(task: Task): void {
@@ -273,14 +346,10 @@ export class SynthesisCoordinator {
   }
 
   private retain(key: string, slot: PreparationSlot, value: PreparedSynthesisChunk): void {
-    this.cache.set(slot, { key, slot, value });
-    const usage = this.getPreparedUsage();
-    if (usage.entries <= 2 && usage.seconds <= MAX_PREPARED_SECONDS && usage.bytes <= MAX_PREPARED_BYTES) return;
-    // Speculative next audio is always the first eviction; an oversized current
-    // result is returned to the caller but not retained.
-    this.cache.delete('next');
-    const current = this.getPreparedUsage();
-    if (current.seconds > MAX_PREPARED_SECONDS || current.bytes > MAX_PREPARED_BYTES) this.cache.delete('current');
+    this.cache.set(slot, { key, value });
+    this.enforcePcmBudget();
+    this.refreshUsage();
+    this.notifyCapacityWaiters();
   }
 
   private assertRuntimeIdentity(identity: PassageSynthesisIdentity): void {
@@ -296,12 +365,110 @@ export class SynthesisCoordinator {
     }
   }
 
-  private identityKey(identity: PassageSynthesisIdentity): string {
-    const existing = this.identityKeys.get(identity);
-    if (existing) return existing;
-    const key = serializeIdentity(identity);
-    this.identityKeys.set(identity, key);
-    return key;
+  private preparedUsage(): PcmUsage {
+    const usage = this.getPreparedUsage();
+    return { seconds: usage.seconds, bytes: usage.bytes };
+  }
+
+  private enforcePcmBudget(): void {
+    let usage = addUsage(this.preparedUsage(), this.inFlightUsage, this.scheduledUsage);
+    if (withinBudget(usage)) return;
+    this.cache.delete('next');
+    usage = addUsage(this.preparedUsage(), this.inFlightUsage, this.scheduledUsage);
+    if (!withinBudget(usage)) this.cache.delete('current');
+  }
+
+  private beginPcmAdmission(task: Task): Promise<void> | undefined {
+    // Preserve the zero-extra-pass cold-start path. With no scheduled PCM,
+    // the request owns the entire budget until its actual result is known.
+    const prepared = this.preparedUsage();
+    if (
+      this.scheduledUsage.seconds === 0 &&
+      this.scheduledUsage.bytes === 0 &&
+      prepared.seconds === 0 &&
+      prepared.bytes === 0
+    ) {
+      const reservation = { seconds: MAX_PREPARED_SECONDS, bytes: MAX_PREPARED_BYTES };
+      this.evictForReservation(reservation);
+      this.inFlightUsage = reservation;
+      this.refreshUsage();
+      return undefined;
+    }
+    return this.awaitPredictedPcmAdmission(task);
+  }
+
+  private async awaitPredictedPcmAdmission(task: Task): Promise<void> {
+    const request = task.request;
+    const predicted = await this.engine.predictDuration(
+      request.chunk.text,
+      request.identity.voiceId,
+      undefined,
+      request.identity.speed
+    );
+    const seconds = Math.min(MAX_PREPARED_SECONDS, Math.max(0, predicted) * 1.25 + 2);
+    const reservation = {
+      seconds,
+      bytes: Math.min(MAX_PREPARED_BYTES, Math.ceil(seconds * 44_100 * Float32Array.BYTES_PER_ELEMENT))
+    };
+    this.assertTaskLive(task);
+    while (true) {
+      this.evictForReservation(reservation);
+      if (withinBudget(addUsage(this.preparedUsage(), this.scheduledUsage, reservation))) {
+        this.inFlightUsage = reservation;
+        this.refreshUsage();
+        return;
+      }
+      await new Promise<void>((resolve) => this.capacityWaiters.add(resolve));
+      this.assertTaskLive(task);
+    }
+  }
+
+  private evictForReservation(reservation: PcmUsage): void {
+    let usage = addUsage(this.preparedUsage(), this.scheduledUsage, reservation);
+    if (withinBudget(usage)) return;
+    this.cache.delete('next');
+    usage = addUsage(this.preparedUsage(), this.scheduledUsage, reservation);
+    if (!withinBudget(usage)) this.cache.delete('current');
+    this.refreshUsage();
+  }
+
+  private notifyCapacityWaiters(): void {
+    const waiters = [...this.capacityWaiters];
+    this.capacityWaiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
+  private refreshUsage(): void {
+    const usage = this.getPcmUsage();
+    this.peakUsage = {
+      seconds: Math.max(this.peakUsage.seconds, usage.total.seconds),
+      bytes: Math.max(this.peakUsage.bytes, usage.total.bytes)
+    };
+    recordTtsDiagnostic({
+      phase: 'memory',
+      preparedBytes: usage.prepared.bytes,
+      inFlightBytes: usage.inFlight.bytes,
+      scheduledBytes: usage.scheduled.bytes,
+      totalPcmBytes: usage.total.bytes,
+      outcome: 'success'
+    });
+  }
+
+  private recordPreparation(
+    request: SynthesisPreparationRequest,
+    preparationOutcome: 'cache-hit' | 'in-flight-adoption'
+  ): void {
+    recordTtsDiagnostic({
+      phase: 'chunk',
+      chunkKind: request.chunk.kind,
+      chunkChars: request.chunk.text.length,
+      preparationOutcome,
+      preparedBytes: this.preparedUsage().bytes,
+      inFlightBytes: this.inFlightUsage.bytes,
+      scheduledBytes: this.scheduledUsage.bytes,
+      totalPcmBytes: this.getPcmUsage().total.bytes,
+      outcome: 'success'
+    });
   }
 }
 
@@ -351,6 +518,28 @@ function serializeIdentity(identity: PassageSynthesisIdentity): string {
 
 function priorityRank(priority: SynthesisPriority): number {
   return priority === 'foreground' ? 0 : 1;
+}
+
+function emptyUsage(): PcmUsage {
+  return { seconds: 0, bytes: 0 };
+}
+
+function sanitizeUsage(usage: PcmUsage): PcmUsage {
+  return {
+    seconds: Number.isFinite(usage.seconds) ? Math.max(0, usage.seconds) : 0,
+    bytes: Number.isFinite(usage.bytes) ? Math.max(0, usage.bytes) : 0
+  };
+}
+
+function addUsage(...values: PcmUsage[]): PcmUsage {
+  return values.reduce(
+    (total, value) => ({ seconds: total.seconds + value.seconds, bytes: total.bytes + value.bytes }),
+    emptyUsage()
+  );
+}
+
+function withinBudget(usage: PcmUsage): boolean {
+  return usage.seconds <= MAX_PREPARED_SECONDS && usage.bytes <= MAX_PREPARED_BYTES;
 }
 
 export const synthesisCoordinator = new SynthesisCoordinator();

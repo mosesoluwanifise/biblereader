@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   compatibleProfile,
   createAtomicSessionSet,
+  getRuntimeCapabilities,
+  InitializationAssetsError,
+  joinAtomicInitialization,
   makeRuntimeProfile,
   ORT_RUNTIME_VERSION,
   profileForModel,
   providerOrder,
   PROFILE_STORAGE_KEY,
   readRuntimeProfile,
+  warmOrReleaseSessionSet,
   writeRuntimeProfile,
   type RuntimeCapabilities
 } from '../../src/services/tts/runtimeProfile';
@@ -15,10 +19,31 @@ import {
 const capabilities: RuntimeCapabilities = {
   webgpu: true,
   crossOriginIsolated: true,
-  hardwareConcurrency: 8
+  hardwareConcurrency: 8,
+  wasmThreads: 4,
+  browserFamily: 'chromium',
+  browserMajor: 140
 };
 
 describe('runtime profile', () => {
+  it('fingerprints browser major and ORT effective WASM thread capacity', () => {
+    const scope = {
+      navigator: {
+        gpu: {},
+        hardwareConcurrency: 10,
+        userAgent: 'Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36'
+      },
+      crossOriginIsolated: true
+    } as unknown as typeof globalThis;
+    expect(getRuntimeCapabilities(scope)).toMatchObject({
+      browserFamily: 'chromium',
+      browserMajor: 140,
+      hardwareConcurrency: 10,
+      wasmThreads: 4
+    });
+    expect(getRuntimeCapabilities({ ...scope, crossOriginIsolated: false } as typeof globalThis).wasmThreads).toBe(1);
+  });
+
   it('uses a compatible persisted provider without probing a different one', () => {
     const profile = makeRuntimeProfile('model-1', 'wasm', capabilities);
     expect(compatibleProfile(profile, capabilities)).toEqual(profile);
@@ -29,7 +54,9 @@ describe('runtime profile', () => {
     ['runtime', { ortVersion: '2.0.0' }],
     ['WebGPU capability', { capabilities: { ...capabilities, webgpu: false } }],
     ['isolation', { capabilities: { ...capabilities, crossOriginIsolated: false } }],
-    ['hardware concurrency', { capabilities: { ...capabilities, hardwareConcurrency: 4 } }]
+    ['hardware concurrency', { capabilities: { ...capabilities, hardwareConcurrency: 4 } }],
+    ['effective WASM threads', { capabilities: { ...capabilities, wasmThreads: 2 } }],
+    ['browser major', { capabilities: { ...capabilities, browserMajor: 141 } }]
   ])('rejects a profile after a %s change', (_name, change) => {
     const profile = { ...makeRuntimeProfile('model-1', 'wasm', capabilities), ...change };
     expect(compatibleProfile(profile, capabilities)).toBeNull();
@@ -129,6 +156,43 @@ describe('runtime profile', () => {
       })
     ).rejects.toThrow('wasm failed');
     expect(released).toEqual(['webgpu:a', 'wasm:a']);
+  });
+
+  it('releases a complete session set when parallel ancillary assets fail', async () => {
+    const released: string[] = [];
+    await expect(
+      joinAtomicInitialization(
+        Promise.resolve({
+          provider: 'webgpu',
+          sessions: new Map([
+            ['a', 'session-a'],
+            ['b', 'session-b']
+          ])
+        }),
+        Promise.reject(new Error('style unavailable')),
+        async (session) => {
+          released.push(session);
+        }
+      )
+    ).rejects.toBeInstanceOf(InitializationAssetsError);
+    expect(released).toEqual(['session-a', 'session-b']);
+  });
+
+  it('releases the complete provider set before a warm-up failure escapes', async () => {
+    const events: string[] = [];
+    await expect(
+      warmOrReleaseSessionSet(
+        ['a', 'b'],
+        async () => {
+          events.push('warmup');
+          throw new Error('unsupported kernel');
+        },
+        async (session) => {
+          events.push(`release:${session}`);
+        }
+      )
+    ).rejects.toThrow('unsupported kernel');
+    expect(events).toEqual(['warmup', 'release:a', 'release:b']);
   });
 
   it('records the installed ORT runtime in new profiles', () => {

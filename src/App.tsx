@@ -21,6 +21,7 @@ import {
   type PlaybackModelPhase,
   PREFETCH_HIGH_WATER_SECONDS,
   PREFETCH_LOW_WATER_SECONDS,
+  SPECULATIVE_PREPARATION_ENABLED,
   type PassageIdentityInput
 } from './services/audio/playbackController';
 import { loadReadingState, saveReadingState } from './services/readingPosition';
@@ -186,7 +187,7 @@ export const App: React.FC = () => {
   // Matching text plus truthful engine readiness is enough to prepare the
   // selected startup chunk. This never creates an AudioContext or autoplays.
   useEffect(() => {
-    if (!currentVerses || !supertonicEngine.isReady()) return;
+    if (!SPECULATIVE_PREPARATION_ENABLED || !currentVerses || !supertonicEngine.isReady()) return;
     const epoch = ++preparationEpoch.current;
     const text = currentVerses.map((verse) => verse.text).join(' ');
     const identity = passageIdentity(text, book, chapter, currentVerses[0].verse, 0, currentDataVersion);
@@ -233,6 +234,7 @@ export const App: React.FC = () => {
           onModelProgress: setModelProgress,
           onModelPhase: setModelPhase,
           onBufferChange: (scheduledAhead) => {
+            if (!SPECULATIVE_PREPARATION_ENABLED) return;
             if (scheduledAhead <= PREFETCH_LOW_WATER_SECONDS) {
               playbackController.cancelPreparation('speculative');
               nextPrimeKey.current = null;
@@ -312,7 +314,7 @@ export const App: React.FC = () => {
   }, [currentVerses, beginPlayback]);
 
   const handleTogglePlay = () => {
-    if (playbackState === 'playing') {
+    if (playbackState === 'playing' || playbackState === 'rebuffering') {
       void playbackController.pause();
       return;
     }
@@ -320,7 +322,7 @@ export const App: React.FC = () => {
       void playbackController.resume();
       return;
     }
-    if (playbackState === 'preparing' || playbackState === 'rebuffering') return;
+    if (playbackState === 'preparing') return;
     beginPlayback();
   };
 

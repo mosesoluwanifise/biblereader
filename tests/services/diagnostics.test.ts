@@ -95,4 +95,46 @@ describe('TTS diagnostics', () => {
     clearTtsDiagnostics();
     expect(getTtsQualificationSnapshot().retention.dropped).toBe(0);
   });
+
+  it('summarizes text-free chunk, reuse, first-speech, and PCM metrics', () => {
+    recordTtsDiagnostic({
+      phase: 'chunk',
+      chunkKind: 'startup',
+      chunkChars: 80,
+      durationMs: 900,
+      preparationOutcome: 'synthesized',
+      preparedBytes: 200_000,
+      inFlightBytes: 400_000,
+      scheduledBytes: 600_000,
+      totalPcmBytes: 1_200_000,
+      outcome: 'success'
+    });
+    recordTtsDiagnostic({
+      phase: 'chunk',
+      chunkKind: 'steady',
+      chunkChars: 250,
+      durationMs: 1_800,
+      preparationOutcome: 'cache-hit',
+      outcome: 'success'
+    });
+    recordTtsDiagnostic({
+      phase: 'chunk',
+      chunkKind: 'startup',
+      chunkChars: 80,
+      preparationOutcome: 'in-flight-adoption',
+      outcome: 'success'
+    });
+    recordTtsDiagnostic({ phase: 'playback', tapToFirstSpeechMs: 1_250, outcome: 'success' });
+
+    const snapshot = getTtsQualificationSnapshot();
+    expect(snapshot.startupSynthesisMs).toEqual({ count: 1, p50: 900, p95: 900, p99: 900 });
+    expect(snapshot.steadySynthesisMs).toEqual({ count: 1, p50: 1800, p95: 1800, p99: 1800 });
+    expect(snapshot.startupChunkChars.count).toBe(2);
+    expect(snapshot.steadyChunkChars.p50).toBe(250);
+    expect(snapshot.preparedCacheHits).toBe(1);
+    expect(snapshot.inFlightAdoptions).toBe(1);
+    expect(snapshot.tapToFirstSpeechMs.p95).toBe(1_250);
+    expect(snapshot.peakTotalPcmBytes).toBe(1_200_000);
+    expect(JSON.stringify(snapshot)).not.toContain('text');
+  });
 });

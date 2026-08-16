@@ -75,15 +75,19 @@ npm run test:supertonic:qualify
 That adds three serial Chromium projects: real WebGPU, forced WASM, and a
 WebGPU-initialization-failure fixture that must atomically fall back to WASM.
 The test attaches `supertonic-qualification.json` under `test-results/`; it
-contains no Bible text. Warm current-passage and primed-navigation runs must
-schedule first audio within 3 seconds. Initialization is reported separately
-from those warm gates.
+contains no Bible text. It records ten raw warm current-passage repetitions
+and requires their nearest-rank p95 controller-observed scheduled-speech onset
+to be at most 3 seconds. The primed-navigation onset must also be at most 3
+seconds. This is the AudioContext clock reaching the controller's first
+scheduled speech boundary, not proof that sound left a particular speaker;
+physical audibility remains part of the manual listening gate. Initialization
+is reported separately from those warm gates.
 
 Optional evidence flags:
 
 ```powershell
 $env:SUPERTONIC_COLD = '1'              # label the fresh context as cold evidence
-$env:SUPERTONIC_LONG = '1'              # run Psalms 119 continuity (up to 25 min)
+$env:SUPERTONIC_LONG = '1'              # run three Psalms 119 passes (last with controlled UI jitter)
 $env:SUPERTONIC_EXPECT_SUPPORTED = '1'  # require completion and zero synthesis underruns
 ```
 
@@ -91,14 +95,22 @@ Do not set `SUPERTONIC_EXPECT_SUPPORTED` until the hardware/browser class is
 named in the run record. A skipped WebGPU adapter, missing model, timeout, or
 `device-too-slow` result is an outcome, not a passing hardware claim.
 
+Long qualification clears diagnostics before each pass, requires the complete
+machine-readable DOM highlight index sequence to be `0..wordCount-1` without
+skips or repeated transitions, and retains raw indices/timestamps. The final
+pass adds a bounded 20 ms main-thread disturbance every 5 seconds. Since the
+UI does not expose the controller's per-word scheduled boundaries, automated
+testing does not claim audible word-timing error or end drift; reviewers must
+complete that listening/timing row in the quality artifact.
+
 The artifact reports provider, steps, isolation, hardware concurrency/thread
 capacity, browser major, model/runtime versions, a capability fingerprint,
 and p50/p95/p99 prepared-chunk wall time. That end-to-end chunk time includes
 the isolated duration predictions used for packed sentence anchors. Production
 factor is **audio seconds / complete chunk synthesis wall seconds**. It also
 reports minimum scheduled-ahead time, synthesis underruns and their duration,
-platform interruptions, cancellation latency, and peak prepared bytes sampled
-by the browser test. Cold evidence keeps download, compilation, and warm-up
+platform interruptions, cancellation latency, and peak aggregate PCM bytes
+(prepared + in-flight + scheduled) from diagnostics. Cold evidence keeps download, compilation, and warm-up
 phases separate from warm-engine time-to-first-audio.
 
 Five-step synthesis remains disabled unless
@@ -109,6 +121,15 @@ cleared before the next load, while eight-step profiles remain valid. The
 provider path has no hidden speed benchmark on Play; initialization fallback
 is one atomic attempt and an unhealthy release should be rolled back rather
 than repeatedly rebuilding session sets in a user session.
+
+Provider fallback has its own rollout switch:
+`VITE_SUPERTONIC_PROVIDER_FALLBACK_ENABLED=0` disables both initialization and
+runtime alternate-provider fallback without disabling narration on the first
+eligible provider. `VITE_SUPERTONIC_SPECULATIVE_PREPARATION=0` disables
+current/next passage speculation. These are independent of the five-step
+quality approval switch. No provider, hardware class, or reduced-step profile
+is considered passed merely because the deterministic smoke suite succeeds;
+only an attached, completed qualification artifact supports that claim.
 
 ## Hosting requirement
 

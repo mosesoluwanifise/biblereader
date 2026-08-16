@@ -53,6 +53,10 @@ class FakeAudioContext {
     }
     this.state = 'running';
   }
+
+  advance(seconds: number) {
+    this.origin -= (seconds * 1000) / FakeAudioContext.SPEEDUP;
+  }
 }
 
 class FakeSource {
@@ -78,10 +82,12 @@ class FakeCoordinator {
   duration = 0.2;
   delayMs = 0;
   productionFactor = 2;
+  speechStart = 0;
   rejectAt: number | null = null;
   deferred = new Map<number, () => void>();
   deferAt = new Set<number>();
   cancellationLatency = new Map<number, number>();
+  scheduledUsages: Array<{ seconds: number; bytes: number }> = [];
 
   async prepare(request: SynthesisPreparationRequest): Promise<PreparedSynthesisChunk> {
     this.calls.push(request);
@@ -95,9 +101,9 @@ class FakeCoordinator {
       audio: new Float32Array(Math.round(sampleRate * this.duration)),
       sampleRate,
       duration: this.duration,
-      speechStart: 0,
-      speechDuration: this.duration,
-      words: interpolateWordTimings(request.chunk.text, this.duration),
+      speechStart: this.speechStart,
+      speechDuration: this.duration - this.speechStart,
+      words: interpolateWordTimings(request.chunk.text, this.duration - this.speechStart, this.speechStart),
       chunk: request.chunk,
       synthesisMs: this.delayMs,
       timingPredictionMs: 0,
@@ -111,6 +117,10 @@ class FakeCoordinator {
 
   clearPrepared() {
     this.clearCalls += 1;
+  }
+
+  setScheduledUsage(usage: { seconds: number; bytes: number }) {
+    this.scheduledUsages.push(usage);
   }
 }
 
@@ -130,6 +140,7 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
   vi.spyOn(supertonicEngine, 'isReady').mockReturnValue(true);
   vi.spyOn(supertonicEngine, 'load').mockResolvedValue(undefined);
+  vi.spyOn(supertonicEngine, 'fallbackFromActiveProvider').mockRejectedValue(new Error('No alternate provider'));
   vi.spyOn(supertonicEngine, 'getRuntimeInfo').mockReturnValue(runtime);
   vi.spyOn(supertonicEngine, 'cancelInFlight');
   clearTtsDiagnostics();
@@ -200,6 +211,57 @@ describe('startup and adoption', () => {
     await flush();
     expect(onBufferChange).toHaveBeenCalled();
     expect(controller.getScheduledAheadSeconds()).toBeGreaterThan(0);
+    expect(coordinator.scheduledUsages.some((usage) => usage.seconds > 0 && usage.bytes > 0)).toBe(true);
+    controller.stop();
+    expect(coordinator.scheduledUsages.at(-1)).toEqual({ seconds: 0, bytes: 0 });
+  });
+
+  it('holds a 15-second candidate until a retained 20-second scheduled buffer is released', async () => {
+    const synthesizeSentence = vi.fn(async (text: string) => {
+      const duration = synthesizeSentence.mock.calls.length === 1 ? 20 : 15;
+      const sampleRate = 1000;
+      return {
+        audio: new Float32Array(duration * sampleRate),
+        sampleRate,
+        duration,
+        speechStart: 0,
+        speechDuration: duration,
+        words: interpolateWordTimings(text, duration)
+      };
+    });
+    const coordinator = new SynthesisCoordinator({
+      getRuntimeInfo: () => runtime,
+      synthesizeSentence,
+      predictDuration: vi.fn(async () => 15)
+    });
+    const controller = new PlaybackController(coordinator);
+    controller.start('First sentence. Second sentence. Third sentence.', 'F1');
+    await flush();
+    await flush();
+
+    expect(synthesizeSentence).toHaveBeenCalledTimes(1);
+    expect(coordinator.getPcmUsage().scheduled.seconds).toBe(20);
+
+    FakeAudioContext.live[0].advance(21);
+    await settle(40);
+
+    expect(synthesizeSentence).toHaveBeenCalledTimes(2);
+    const usage = coordinator.getPcmUsage();
+    expect(usage.peak.seconds).toBeLessThanOrEqual(usage.limits.maxSeconds);
+    expect(usage.peak.bytes).toBeLessThanOrEqual(usage.limits.maxBytes);
+    controller.stop();
+  });
+
+  it('records tap-to-first-speech only when the running audio clock reaches speech onset', async () => {
+    const coordinator = new FakeCoordinator();
+    coordinator.duration = 0.3;
+    coordinator.speechStart = 0.2;
+    const controller = new PlaybackController(coordinator);
+    controller.start('Delayed speech onset.', 'F1');
+    await settle(80);
+    expect(getTtsDiagnostics().some((event) => event.tapToFirstSpeechMs !== undefined)).toBe(false);
+    await settle(180);
+    expect(getTtsDiagnostics().some((event) => event.tapToFirstSpeechMs !== undefined)).toBe(true);
     controller.stop();
   });
 
@@ -312,6 +374,24 @@ describe('producer sustainability', () => {
     controller.stop();
   });
 
+  it('pauses during rebuffering and resumes the completed buffer without restarting', async () => {
+    const coordinator = new FakeCoordinator();
+    coordinator.duration = 0.05;
+    coordinator.deferAt.add(2);
+    const controller = new PlaybackController(coordinator);
+    controller.start('First sentence. Second sentence. Third sentence.', 'F1');
+    await settle(90);
+    expect(controller.getState()).toBe('rebuffering');
+    await controller.pause();
+    expect(controller.getState()).toBe('paused');
+    coordinator.deferred.get(2)?.();
+    await flush();
+    await controller.resume();
+    expect(controller.getState()).toBe('playing');
+    expect(coordinator.calls).toHaveLength(2);
+    controller.stop();
+  });
+
   it('completes a sustainable full passage without synthesis underruns', async () => {
     FakeAudioContext.SPEEDUP = 10;
     const coordinator = new FakeCoordinator();
@@ -348,7 +428,21 @@ describe('producer sustainability', () => {
     expect(lastUnderrun?.underrunCount).toBeGreaterThanOrEqual(2);
     expect(lastUnderrun?.underrunDurationMs).toBeGreaterThan(0);
     expect(onError).toHaveBeenCalledWith(expect.stringContaining('cannot synthesize'));
+    expect(supertonicEngine.fallbackFromActiveProvider).toHaveBeenCalledTimes(1);
     expect(supertonicEngine.load).not.toHaveBeenCalled();
+  });
+
+  it('classifies marginal production with repeated underruns and attempts fallback only once', async () => {
+    FakeAudioContext.SPEEDUP = 10;
+    const coordinator = new FakeCoordinator();
+    coordinator.duration = 1;
+    coordinator.delayMs = 100;
+    coordinator.productionFactor = 1.1;
+    const controller = new PlaybackController(coordinator);
+    controller.start(longPassage(12), 'F1');
+    await settle(1000);
+    expect(controller.getState()).toBe('device-too-slow');
+    expect(supertonicEngine.fallbackFromActiveProvider).toHaveBeenCalledTimes(1);
   });
 
   it('records an externally suspended audio graph separately from synthesis underruns', async () => {
@@ -372,6 +466,27 @@ describe('producer sustainability', () => {
 });
 
 describe('cancellation and failure', () => {
+  it('clears model progress and phase when engine loading rejects', async () => {
+    vi.mocked(supertonicEngine.isReady).mockReturnValue(false);
+    vi.mocked(supertonicEngine.load).mockImplementation(async (onProgress) => {
+      onProgress?.({ loaded: 1, total: 2, label: 'duration_predictor' });
+      throw new Error('model load failed');
+    });
+    const progress: Array<number | null> = [];
+    const phases: Array<string | null> = [];
+    const onError = vi.fn();
+    const controller = new PlaybackController(new FakeCoordinator());
+    controller.start('One sentence.', 'F1', {
+      onModelProgress: (value) => progress.push(value),
+      onModelPhase: (value) => phases.push(value),
+      onError
+    });
+    await flush();
+    await flush();
+    expect(progress).toEqual([0.5, null]);
+    expect(phases).toEqual(['compile', null]);
+    expect(onError).toHaveBeenCalledWith('model load failed');
+  });
   it('explicit stop prevents an in-flight stale completion from scheduling audio', async () => {
     const coordinator = new FakeCoordinator();
     coordinator.duration = 2;

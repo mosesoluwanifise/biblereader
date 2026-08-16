@@ -50,17 +50,29 @@ Attach `supertonic-qualification.json` for both step counts. Production factor
 means audio seconds divided by end-to-end prepared-chunk wall time, including
 packed-segment duration predictions; higher is better.
 
-| Steps | Provider | Warm TTFA p95 | Synthesis ms p50/p95/p99 | Production factor p50/p95/p99 | Min ahead | Underruns / duration |
-| ---: | --- | ---: | --- | --- | ---: | --- |
-| 5 | | | | | | |
-| 8 | | | | | | |
+| Steps | Provider | 10+ raw warm scheduled-onset samples | Nearest-rank p95 | Synthesis ms p50/p95/p99 | Production factor p50/p95/p99 | Peak aggregate PCM | Min ahead | Underruns / duration |
+| ---: | --- | --- | ---: | --- | --- | ---: | ---: | --- |
+| 5 | | | | | | | | |
+| 8 | | | | | | | | |
+
+The automated onset is the controller observing its AudioContext clock reach
+the first scheduled speech boundary; it is not a microphone measurement of
+physical speaker output. Attach the raw observations, not only the percentile.
+
+For each supported class, attach three complete long-chapter passes. The final
+pass uses the harness's bounded main-thread jitter profile. Automated evidence
+must contain the exact monotonic `0..wordCount-1` highlighted global-index
+sequence with no skipped or repeated transitions. The current UI does not
+expose scheduled per-word audio boundaries, so automated DOM timestamps cannot
+establish audible timing error or drift; complete the manual timing comparison
+above against physical output.
 
 ## Decision
 
 - [ ] Listening comparison passes.
 - [ ] Timing comparison passes.
-- [ ] Warm current and primed navigation scheduled-first-audio are each <=3 s.
-- [ ] Named supported classes complete the long-chapter gate with zero synthesis underruns.
+- [ ] At least ten raw warm current-passage observations are attached and nearest-rank p95 is <=3 s; primed navigation is <=3 s.
+- [ ] Named supported classes complete three long-chapter passes (including controlled jitter) with zero synthesis underruns and exact highlight-index order.
 - [ ] WebGPU, forced-WASM, and initialization-fallback outcomes are attached.
 - [ ] Mid-session WebGPU device-loss manual profile reaches a retryable state.
 - [ ] Approval value exactly equals the model manifest version.
@@ -72,3 +84,9 @@ Approver and date:
 Rollback: remove or change `VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED` and
 redeploy. The next engine load rejects and clears any persisted five-step
 profile; eight-step profiles are unaffected.
+
+Independent rollout switches: set
+`VITE_SUPERTONIC_PROVIDER_FALLBACK_ENABLED=0` to disable alternate-provider
+fallback, or `VITE_SUPERTONIC_SPECULATIVE_PREPARATION=0` to disable passage
+speculation. Record their exact deployed values with the artifact. An empty
+template, skipped project, smoke run, or incomplete long pass is not a pass.

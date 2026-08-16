@@ -8,6 +8,7 @@ import {
   getRuntimeCapabilities,
   makeRuntimeProfile,
   ORT_RUNTIME_VERSION,
+  providerOrder,
   readRuntimeProfile,
   writeRuntimeProfile,
   type RuntimeProfile,
@@ -83,6 +84,7 @@ export class SupertonicEngine {
   private currentGeneration = 1;
   private progressListeners = new Set<(p: LoadProgress) => void>();
   private lastProgress: LoadProgress | null = null;
+  private excludedProviders = new Set<RuntimeProvider>();
 
   getStatus(): EngineStatus {
     return this.status;
@@ -120,11 +122,9 @@ export class SupertonicEngine {
     const worker = new Worker(new URL('./synthesis.worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => this.handle(event.data);
     worker.onerror = (event) => {
+      if (this.worker !== worker) return;
       const error = new Error(event.message || 'Synthesis worker failed');
-      this.status = 'failed';
-      this.loadPromise = null;
-      for (const [, entry] of this.pending) entry.reject(error);
-      this.pending.clear();
+      this.resetFailedWorker(error);
     };
 
     this.worker = worker;
@@ -137,6 +137,7 @@ export class SupertonicEngine {
 
     switch (message.type) {
       case 'progress':
+        if (message.failedProvider) this.excludedProviders.add(message.failedProvider);
         entry.onProgress?.({ loaded: message.loaded, total: message.total, label: message.label });
         break;
       case 'loaded':
@@ -228,9 +229,12 @@ export class SupertonicEngine {
           outcome: 'failure'
         });
         if (message.providerLost) {
+          if (this.backend === 'webgpu' || this.backend === 'wasm') this.excludedProviders.add(this.backend);
           clearRuntimeProfile();
-          this.status = 'failed';
-          this.loadPromise = null;
+          const error = new Error(message.message);
+          this.resetFailedWorker(error);
+          entry.reject(error);
+          break;
         }
         entry.reject(new Error(message.message));
         break;
@@ -289,7 +293,13 @@ export class SupertonicEngine {
     };
 
     this.loadPromise = this.send<void>(
-      { type: 'load', modelBase: MODEL_BASE, preferredProfile: this.preferredProfile },
+      {
+        type: 'load',
+        modelBase: MODEL_BASE,
+        preferredProfile: this.preferredProfile,
+        excludedProviders: [...this.excludedProviders],
+        allowProviderFallback: providerFallbackEnabled()
+      },
       publish
     )
       .catch((err) => {
@@ -306,6 +316,23 @@ export class SupertonicEngine {
         this.lastProgress = null;
       });
     return this.loadPromise;
+  }
+
+  /** Tears down the active runtime and makes one bounded alternate-provider load. */
+  async fallbackFromActiveProvider(onProgress?: (p: LoadProgress) => void): Promise<void> {
+    if (!providerFallbackEnabled()) throw new Error('Supertonic provider fallback is disabled');
+    if (this.backend !== 'webgpu' && this.backend !== 'wasm') throw new Error('No active provider is available to replace');
+
+    this.excludedProviders.add(this.backend);
+    const candidates = providerOrder(getRuntimeCapabilities(), null).filter(
+      (provider) => !this.excludedProviders.has(provider)
+    );
+    if (candidates.length === 0) throw new Error('No alternate Supertonic provider remains');
+
+    clearRuntimeProfile();
+    this.resetWorkerRuntime(new EngineCancelled());
+    this.status = 'idle';
+    await this.load(onProgress);
   }
 
   /**
@@ -391,10 +418,22 @@ export class SupertonicEngine {
   }
 
   async dispose(): Promise<void> {
-    this.worker?.terminate();
-    this.worker = null;
-    this.pending.clear();
+    this.resetWorkerRuntime(new EngineCancelled());
     this.status = 'idle';
+    this.excludedProviders.clear();
+  }
+
+  private resetFailedWorker(error: Error): void {
+    this.resetWorkerRuntime(error);
+    this.status = 'failed';
+  }
+
+  private resetWorkerRuntime(error: Error): void {
+    const worker = this.worker;
+    this.worker = null;
+    worker?.terminate();
+    for (const entry of this.pending.values()) entry.reject(error);
+    this.pending.clear();
     this.loadPromise = null;
     this.backend = null;
     this.runtimeSteps = DEFAULT_STEPS;
@@ -404,6 +443,10 @@ export class SupertonicEngine {
     this.progressListeners.clear();
     this.lastProgress = null;
   }
+}
+
+function providerFallbackEnabled(): boolean {
+  return import.meta.env.VITE_SUPERTONIC_PROVIDER_FALLBACK_ENABLED !== '0';
 }
 
 export const supertonicEngine = new SupertonicEngine();

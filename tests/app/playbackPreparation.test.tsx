@@ -39,7 +39,8 @@ vi.mock('../../src/services/audio/playbackController', () => ({
   playbackController: controller,
   PlaybackController: class {},
   PREFETCH_LOW_WATER_SECONDS: 8,
-  PREFETCH_HIGH_WATER_SECONDS: 12
+  PREFETCH_HIGH_WATER_SECONDS: 12,
+  SPECULATIVE_PREPARATION_ENABLED: true
 }));
 
 import { App } from '../../src/App';
@@ -208,12 +209,21 @@ describe('accessible narration states', () => {
     ['preparing', {}, 'Preparing narration…'],
     ['rebuffering', {}, 'Rebuffering narration…'],
     ['device-too-slow', { errorMessage: 'Too slow.' }, 'Too slow.'],
-    ['preparing', { modelProgress: 0.4 }, 'Downloading voice model… 40%'],
-    ['preparing', { modelProgress: 1, modelPhase: 'provider-fallback' }, 'Trying a compatible audio engine…']
+    ['preparing', { modelProgress: 1, modelPhase: 'provider-fallback' }, 'Trying a compatible audio engine…'],
+    ['preparing', { modelPhase: 'compile' }, 'Compiling voice model…'],
+    ['preparing', { modelPhase: 'warmup' }, 'Warming up narration…']
   ] as const)('announces %s distinctly', (playbackState, overrides, expected) => {
     const { unmount } = render(<AudioControls {...base} {...overrides} playbackState={playbackState} />);
     expect(screen.getAllByRole('status').some((node) => node.textContent === expected)).toBe(true);
     unmount();
+  });
+
+  it('exposes stable busy state and numeric download progress', () => {
+    render(<AudioControls {...base} playbackState="preparing" modelProgress={0.4} modelPhase="download" />);
+    const player = screen.getByRole('region', { name: 'Audio narration controls' });
+    expect(player).toHaveAttribute('data-narration-status', 'download');
+    expect(player).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByRole('progressbar', { name: 'Downloading voice model' })).toHaveAttribute('aria-valuenow', '40');
   });
 
   it('exposes a retry action after a retryable error', () => {
@@ -221,8 +231,16 @@ describe('accessible narration states', () => {
     expect(screen.getByRole('button', { name: 'Retry narration' })).toBeEnabled();
   });
 
-  it.each(['preparing', 'rebuffering'] as const)('does not restart playback while %s', (playbackState) => {
-    render(<AudioControls {...base} playbackState={playbackState} />);
+  it('does not restart playback while preparing', () => {
+    render(<AudioControls {...base} playbackState="preparing" />);
     expect(screen.getByRole('button', { name: 'Play' })).toBeDisabled();
+  });
+
+  it('allows pausing while rebuffering', async () => {
+    const user = userEvent.setup();
+    const onTogglePlay = vi.fn();
+    render(<AudioControls {...base} playbackState="rebuffering" onTogglePlay={onTogglePlay} />);
+    await user.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(onTogglePlay).toHaveBeenCalledTimes(1);
   });
 });
