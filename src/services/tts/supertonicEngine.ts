@@ -1,7 +1,19 @@
-import { SynthesisResult, WordTimestamp } from './types';
+import { EngineRuntimeInfo, SynthesisResult, WordTimestamp } from './types';
 import { DEFAULT_VOICE_ID } from './voices';
 import { interpolateWordTimings } from './wordTiming';
 import type { WorkerRequest, WorkerResponse } from './synthesis.worker';
+import { recordTtsDiagnostic } from './diagnostics';
+import {
+  clearRuntimeProfile,
+  getRuntimeCapabilities,
+  makeRuntimeProfile,
+  ORT_RUNTIME_VERSION,
+  providerOrder,
+  readRuntimeProfile,
+  writeRuntimeProfile,
+  type RuntimeProfile,
+  type RuntimeProvider
+} from './runtimeProfile';
 
 export { PRESET_VOICES, findVoice, DEFAULT_VOICE_ID } from './voices';
 
@@ -42,6 +54,9 @@ interface Pending {
   resolve: (value: never) => void;
   reject: (reason: Error) => void;
   onProgress?: (p: LoadProgress) => void;
+  startedAt: number;
+  steps?: number;
+  requestType: WorkerRequest['type'];
 }
 
 /** Plain Omit collapses a discriminated union into its shared keys. */
@@ -62,11 +77,14 @@ export class SupertonicEngine {
   private status: EngineStatus = 'idle';
   private loadPromise: Promise<void> | null = null;
   private backend: string | null = null;
+  private runtimeSteps = DEFAULT_STEPS;
+  private preferredProfile: RuntimeProfile | null = null;
   private version: string | null = null;
   private voiceIds: string[] = [];
   private currentGeneration = 1;
   private progressListeners = new Set<(p: LoadProgress) => void>();
   private lastProgress: LoadProgress | null = null;
+  private excludedProviders = new Set<RuntimeProvider>();
 
   getStatus(): EngineStatus {
     return this.status;
@@ -74,6 +92,16 @@ export class SupertonicEngine {
 
   getBackend(): string | null {
     return this.backend;
+  }
+
+  getRuntimeInfo(): EngineRuntimeInfo | null {
+    if (!this.backend) return null;
+    return {
+      provider: this.backend as RuntimeProvider,
+      steps: this.runtimeSteps,
+      modelVersion: this.version,
+      ortVersion: ORT_RUNTIME_VERSION
+    };
   }
 
   getVersion(): string | null {
@@ -94,10 +122,9 @@ export class SupertonicEngine {
     const worker = new Worker(new URL('./synthesis.worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => this.handle(event.data);
     worker.onerror = (event) => {
+      if (this.worker !== worker) return;
       const error = new Error(event.message || 'Synthesis worker failed');
-      this.status = 'failed';
-      for (const [, entry] of this.pending) entry.reject(error);
-      this.pending.clear();
+      this.resetFailedWorker(error);
     };
 
     this.worker = worker;
@@ -110,19 +137,83 @@ export class SupertonicEngine {
 
     switch (message.type) {
       case 'progress':
+        if (message.failedProvider) this.excludedProviders.add(message.failedProvider);
         entry.onProgress?.({ loaded: message.loaded, total: message.total, label: message.label });
         break;
       case 'loaded':
         this.backend = message.backend;
         this.version = message.version;
         this.voiceIds = message.voiceIds;
+        this.runtimeSteps = message.steps;
+        {
+          const capabilities = getRuntimeCapabilities();
+          const attemptedFirst = this.preferredProfile?.provider ?? (capabilities.webgpu ? 'webgpu' : 'wasm');
+          if (attemptedFirst !== message.backend) {
+            recordTtsDiagnostic({
+              phase: 'provider-fallback',
+              provider: message.backend,
+              steps: message.steps,
+              outcome: 'success'
+            });
+          }
+        }
+        recordTtsDiagnostic({
+          phase: 'compile',
+          durationMs: message.compileMs,
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        recordTtsDiagnostic({
+          phase: 'warmup',
+          durationMs: message.warmupMs,
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        recordTtsDiagnostic({
+          phase: 'download',
+          durationMs: Math.max(0, performance.now() - entry.startedAt - message.compileMs - message.warmupMs),
+          provider: message.backend,
+          steps: message.steps,
+          outcome: 'success'
+        });
+        if (message.version) {
+          const qualityApproved =
+            import.meta.env.VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED === message.version;
+          const storedSteps = qualityApproved ? 5 : message.steps;
+          const stored = makeRuntimeProfile(message.version, message.backend, getRuntimeCapabilities(), storedSteps);
+          if (qualityApproved) {
+            stored.qualityGate = { steps: 5, approved: true, modelVersion: message.version };
+          } else if (message.steps === 5 && this.preferredProfile?.qualityGate) {
+            stored.qualityGate = this.preferredProfile.qualityGate;
+          }
+          writeRuntimeProfile(stored);
+        }
         this.status = 'ready';
         this.pending.delete(message.id);
         (entry.resolve as unknown as () => void)();
         break;
       case 'audio':
         this.pending.delete(message.id);
+        {
+          const durationMs = performance.now() - entry.startedAt;
+          const audioSeconds = message.audio.byteLength / Float32Array.BYTES_PER_ELEMENT / message.sampleRate;
+          recordTtsDiagnostic({
+            phase: 'synthesis',
+            durationMs,
+            provider: (this.backend as RuntimeProvider | null) ?? undefined,
+            steps: entry.steps,
+            audioSeconds,
+            realtimeFactor: durationMs > 0 ? audioSeconds / (durationMs / 1000) : undefined,
+            outcome: 'success'
+          });
+        }
         (entry.resolve as unknown as (v: WorkerResponse) => void)(message);
+        break;
+      case 'duration':
+        this.pending.delete(message.id);
+        (entry.resolve as unknown as (v: number) => void)(message.predicted);
         break;
       case 'cancelled':
         this.pending.delete(message.id);
@@ -130,6 +221,21 @@ export class SupertonicEngine {
         break;
       case 'error':
         this.pending.delete(message.id);
+        recordTtsDiagnostic({
+          phase: entry.requestType === 'load' ? 'compile' : 'synthesis',
+          durationMs: performance.now() - entry.startedAt,
+          provider: (this.backend as RuntimeProvider | null) ?? undefined,
+          steps: entry.steps,
+          outcome: 'failure'
+        });
+        if (message.providerLost) {
+          if (this.backend === 'webgpu' || this.backend === 'wasm') this.excludedProviders.add(this.backend);
+          clearRuntimeProfile();
+          const error = new Error(message.message);
+          this.resetFailedWorker(error);
+          entry.reject(error);
+          break;
+        }
         entry.reject(new Error(message.message));
         break;
     }
@@ -142,7 +248,14 @@ export class SupertonicEngine {
     const worker = this.ensureWorker();
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as never, reject, onProgress });
+      this.pending.set(id, {
+        resolve: resolve as never,
+        reject,
+        onProgress,
+        startedAt: performance.now(),
+        steps: request.type === 'synthesize' ? request.steps : undefined,
+        requestType: request.type
+      });
       worker.postMessage({ ...request, id } as WorkerRequest);
     });
   }
@@ -168,13 +281,32 @@ export class SupertonicEngine {
     if (this.loadPromise) return this.loadPromise;
 
     this.status = 'loading';
+    this.preferredProfile = readRuntimeProfile(
+      getRuntimeCapabilities(),
+      undefined,
+      import.meta.env.VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED
+    );
+    recordTtsDiagnostic({ phase: 'download', outcome: 'start' });
     const publish = (p: LoadProgress) => {
       this.lastProgress = p;
       for (const listener of this.progressListeners) listener(p);
     };
 
-    this.loadPromise = this.send<void>({ type: 'load', modelBase: MODEL_BASE }, publish)
+    this.loadPromise = this.send<void>(
+      {
+        type: 'load',
+        modelBase: MODEL_BASE,
+        preferredProfile: this.preferredProfile,
+        excludedProviders: [...this.excludedProviders],
+        allowProviderFallback: providerFallbackEnabled()
+      },
+      publish
+    )
       .catch((err) => {
+        recordTtsDiagnostic({
+          phase: 'download',
+          outcome: 'failure'
+        });
         this.status = 'failed';
         this.loadPromise = null;
         throw err;
@@ -186,6 +318,23 @@ export class SupertonicEngine {
     return this.loadPromise;
   }
 
+  /** Tears down the active runtime and makes one bounded alternate-provider load. */
+  async fallbackFromActiveProvider(onProgress?: (p: LoadProgress) => void): Promise<void> {
+    if (!providerFallbackEnabled()) throw new Error('Supertonic provider fallback is disabled');
+    if (this.backend !== 'webgpu' && this.backend !== 'wasm') throw new Error('No active provider is available to replace');
+
+    this.excludedProviders.add(this.backend);
+    const candidates = providerOrder(getRuntimeCapabilities(), null).filter(
+      (provider) => !this.excludedProviders.has(provider)
+    );
+    if (candidates.length === 0) throw new Error('No alternate Supertonic provider remains');
+
+    clearRuntimeProfile();
+    this.resetWorkerRuntime(new EngineCancelled());
+    this.status = 'idle';
+    await this.load(onProgress);
+  }
+
   /**
    * Synthesizes one sentence. Word timings are interpolated inside the
    * duration the model predicted for this sentence, so the sentence boundary
@@ -194,7 +343,7 @@ export class SupertonicEngine {
   async synthesizeSentence(
     text: string,
     voiceId: string = DEFAULT_VOICE_ID,
-    steps: number = DEFAULT_STEPS,
+    steps?: number,
     generation: number = this.generation,
     speed?: number
   ): Promise<SynthesisResult> {
@@ -208,7 +357,7 @@ export class SupertonicEngine {
       type: 'synthesize',
       text: trimmed,
       voiceId,
-      steps,
+      steps: steps ?? this.runtimeSteps,
       generation,
       speed
     });
@@ -228,8 +377,29 @@ export class SupertonicEngine {
       audio,
       sampleRate: result.sampleRate,
       duration,
+      speechStart,
+      speechDuration,
       words: interpolateWordTimings(trimmed, speechDuration, speechStart)
     };
+  }
+
+  /** Runs only the model's duration graph for an isolated timing anchor. */
+  async predictDuration(
+    text: string,
+    voiceId: string = DEFAULT_VOICE_ID,
+    generation: number = this.generation,
+    speed?: number
+  ): Promise<number> {
+    const trimmed = text.trim();
+    if (!trimmed) return 0;
+    if (!this.isReady()) throw new Error('Engine not loaded');
+    return this.send<number>({
+      type: 'predict-duration',
+      text: trimmed,
+      voiceId,
+      generation,
+      speed
+    });
   }
 
   /** Current generation; synthesis requests are tagged with it. */
@@ -248,15 +418,35 @@ export class SupertonicEngine {
   }
 
   async dispose(): Promise<void> {
-    this.worker?.terminate();
-    this.worker = null;
-    this.pending.clear();
+    this.resetWorkerRuntime(new EngineCancelled());
     this.status = 'idle';
+    this.excludedProviders.clear();
+  }
+
+  private resetFailedWorker(error: Error): void {
+    this.resetWorkerRuntime(error);
+    this.status = 'failed';
+  }
+
+  private resetWorkerRuntime(error: Error): void {
+    const worker = this.worker;
+    this.worker = null;
+    worker?.terminate();
+    for (const entry of this.pending.values()) entry.reject(error);
+    this.pending.clear();
     this.loadPromise = null;
     this.backend = null;
+    this.runtimeSteps = DEFAULT_STEPS;
+    this.preferredProfile = null;
+    this.version = null;
+    this.voiceIds = [];
     this.progressListeners.clear();
     this.lastProgress = null;
   }
+}
+
+function providerFallbackEnabled(): boolean {
+  return import.meta.env.VITE_SUPERTONIC_PROVIDER_FALLBACK_ENABLED !== '0';
 }
 
 export const supertonicEngine = new SupertonicEngine();

@@ -1,4 +1,7 @@
 import { WordTimestamp } from './types';
+import { countWords } from '../text';
+
+export { countWords } from '../text';
 
 /**
  * Word timings interpolated inside a model-anchored sentence duration.
@@ -74,6 +77,11 @@ export function interpolateWordTimings(text: string, totalSeconds: number, start
   return timings;
 }
 
+/** Normalizes passage text exactly as splitSentences does. */
+export function normalizePassageText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Splits a passage into sentences for synthesis.
  *
@@ -82,7 +90,7 @@ export function interpolateWordTimings(text: string, totalSeconds: number, start
  * would put every word's position at the mercy of one estimate.
  */
 export function splitSentences(text: string, maxChars = 240): string[] {
-  const normalized = text.replace(/\s+/g, ' ').trim();
+  const normalized = normalizePassageText(text);
   if (normalized.length === 0) return [];
 
   const sentences: string[] = [];

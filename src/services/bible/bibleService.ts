@@ -1,6 +1,9 @@
 import booksCatalog from '../../data/books.json';
 import { BookData, BookEntry, ChapterResult, TranslationCode, Verse } from './types';
 import { readCachedBook, writeCachedBook, reconcileDataVersion } from './bibleCache';
+import { countWords } from '../text';
+
+export { countWords } from '../text';
 
 export const BIBLE_BOOKS = booksCatalog as BookEntry[];
 
@@ -57,6 +60,7 @@ export function getNextChapter(bookName: string, chapter: number): { book: strin
  * before any cached read so a stale book cannot be served first.
  */
 let versionCheck: Promise<void> | null = null;
+let currentDataVersion = 'bundled-unknown';
 
 function ensureCurrentData(): Promise<void> {
   versionCheck ??= (async () => {
@@ -65,12 +69,19 @@ function ensureCurrentData(): Promise<void> {
       if (!response.ok) return;
       const { version } = (await response.json()) as { version?: string };
       if (!version) return;
+      currentDataVersion = version;
       if (await reconcileDataVersion(version)) memoryCache.clear();
     } catch {
       // A missing or unreachable manifest must not block reading.
     }
   })();
   return versionCheck;
+}
+
+/** Stable source-text version used in prepared-audio identity keys. */
+export async function getBibleDataVersion(): Promise<string> {
+  await ensureCurrentData();
+  return currentDataVersion;
 }
 
 async function loadBook(bookName: string, translation: TranslationCode): Promise<BookData | null> {
@@ -158,7 +169,7 @@ export async function loadChapter(
     };
   }
 
-  return { ok: true, verses };
+  return { ok: true, verses, dataVersion: currentDataVersion };
 }
 
 /** Word tokens for highlighting. Whitespace is dropped; order is preserved. */
@@ -167,12 +178,6 @@ export function splitIntoWords(text: string): { word: string; cleanWord: string 
     .split(/(\s+)/)
     .filter((token) => token.trim().length > 0)
     .map((token) => ({ word: token, cleanWord: token.replace(/[^\w]/g, '').toLowerCase() }));
-}
-
-/** Word count used to align highlight indices across verses. */
-export function countWords(text: string): number {
-  const trimmed = text.trim();
-  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
 }
 
 /** Cumulative word offset of each verse within a chapter. */
@@ -190,4 +195,5 @@ export function clearMemoryCache(): void {
   memoryCache.clear();
   inFlight.clear();
   versionCheck = null;
+  currentDataVersion = 'bundled-unknown';
 }

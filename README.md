@@ -45,8 +45,10 @@ npm run dev
 | `npm test` | Vitest logic tier |
 | `npm run test:watch` | Vitest in watch mode |
 | `npm run test:e2e` | Playwright browser tier |
+| `npm run test:e2e:smoke` | Deterministic Chromium smoke; does not download the voice model |
+| `npm run test:supertonic:qualify` | Opt-in real-model qualification (requires environment flags below) |
 | `npm run build:bible` | Generate `public/bibles/` from the upstream text source |
-| `npm run build:models` | Download and license the Supertonic model bundle (fp32; `--quantize` for int8) |
+| `npm run build:models` | Download and license the Supertonic fp32 model bundle |
 | `npm run build:cloudflare` | Production build for Cloudflare Pages — see below |
 | `npm run deploy:models` | Push the model bundle to R2 for the Cloudflare deploy |
 
@@ -55,6 +57,79 @@ Playwright needs its browsers once before `test:e2e`:
 ```bash
 npx playwright install
 ```
+
+## Supertonic performance qualification
+
+Ordinary CI runs only `chromium-smoke`. It verifies the page, deployment
+headers, and the bounded diagnostics harness without fetching the roughly
+398 MB model. No hardware performance claim is made by that test.
+
+Real-device qualification is explicit. Install/build the model assets, then
+set the flag in the shell that launches Playwright:
+
+```powershell
+$env:SUPERTONIC_QUALIFY = '1'
+npm run test:supertonic:qualify
+```
+
+That adds three serial Chromium projects: real WebGPU, forced WASM, and a
+WebGPU-initialization-failure fixture that must atomically fall back to WASM.
+The test attaches `supertonic-qualification.json` under `test-results/`; it
+contains no Bible text. It records ten raw warm current-passage repetitions
+and requires their nearest-rank p95 controller-observed scheduled-speech onset
+to be at most 3 seconds. The primed-navigation onset must also be at most 3
+seconds. This is the AudioContext clock reaching the controller's first
+scheduled speech boundary, not proof that sound left a particular speaker;
+physical audibility remains part of the manual listening gate. Initialization
+is reported separately from those warm gates.
+
+Optional evidence flags:
+
+```powershell
+$env:SUPERTONIC_COLD = '1'              # label the fresh context as cold evidence
+$env:SUPERTONIC_LONG = '1'              # run three Psalms 119 passes (last with controlled UI jitter)
+$env:SUPERTONIC_EXPECT_SUPPORTED = '1'  # require completion and zero synthesis underruns
+```
+
+Do not set `SUPERTONIC_EXPECT_SUPPORTED` until the hardware/browser class is
+named in the run record. A skipped WebGPU adapter, missing model, timeout, or
+`device-too-slow` result is an outcome, not a passing hardware claim.
+
+Long qualification clears diagnostics before each pass, requires the complete
+machine-readable DOM highlight index sequence to be `0..wordCount-1` without
+skips or repeated transitions, and retains raw indices/timestamps. The final
+pass adds a bounded 20 ms main-thread disturbance every 5 seconds. Since the
+UI does not expose the controller's per-word scheduled boundaries, automated
+testing does not claim audible word-timing error or end drift; reviewers must
+complete that listening/timing row in the quality artifact.
+
+The artifact reports provider, steps, isolation, hardware concurrency/thread
+capacity, browser major, model/runtime versions, a capability fingerprint,
+and p50/p95/p99 prepared-chunk wall time. That end-to-end chunk time includes
+the isolated duration predictions used for packed sentence anchors. Production
+factor is **audio seconds / complete chunk synthesis wall seconds**. It also
+reports minimum scheduled-ahead time, synthesis underruns and their duration,
+platform interruptions, cancellation latency, and peak aggregate PCM bytes
+(prepared + in-flight + scheduled) from diagnostics. Cold evidence keeps download, compilation, and warm-up
+phases separate from warm-engine time-to-first-audio.
+
+Five-step synthesis remains disabled unless
+`VITE_SUPERTONIC_FIVE_STEP_QUALITY_APPROVED` equals the exact model manifest
+version recorded in a completed quality artifact. Removing or changing that
+deployment value is the reduced-step kill switch: persisted five-step state is
+cleared before the next load, while eight-step profiles remain valid. The
+provider path has no hidden speed benchmark on Play; initialization fallback
+is one atomic attempt and an unhealthy release should be rolled back rather
+than repeatedly rebuilding session sets in a user session.
+
+Provider fallback has its own rollout switch:
+`VITE_SUPERTONIC_PROVIDER_FALLBACK_ENABLED=0` disables both initialization and
+runtime alternate-provider fallback without disabling narration on the first
+eligible provider. `VITE_SUPERTONIC_SPECULATIVE_PREPARATION=0` disables
+current/next passage speculation. These are independent of the five-step
+quality approval switch. No provider, hardware class, or reduced-step profile
+is considered passed merely because the deterministic smoke suite succeeds;
+only an attached, completed qualification artifact supports that claim.
 
 ## Hosting requirement
 
@@ -65,12 +140,12 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-Without them `crossOriginIsolated` is false, `SharedArrayBuffer` is
-unavailable, and `onnxruntime-web` silently falls back to a single WASM
-thread. That was measured at roughly 4.6x slower than multi-threaded
-inference over identical weights — the difference between synthesis keeping
-up with playback and stalling before every sentence. The dev and preview
-servers set them via `vite.config.ts`; static hosts need their own config.
+Without them `crossOriginIsolated` is false and `SharedArrayBuffer` is
+unavailable, so the WASM runtime cannot use its normal thread capacity. The
+effect depends on the browser and hardware and must be recorded by the
+qualification artifact; it is not assumed from one development machine. The
+dev and preview servers set the headers via `vite.config.ts`; static hosts need
+their own config.
 
 ## Deploying to Cloudflare Pages
 
@@ -132,7 +207,7 @@ edge will keep serving the previous bundle until it expires on its own.
 ## Architecture
 
 - `src/services/bible/` — book catalog, text loading, offline cache
-- `src/services/tts/` — Supertonic ONNX engine, word timing, Web Speech fallback
+- `src/services/tts/` — Supertonic ONNX engine, chunk planning, timing, and bounded diagnostics
 - `src/services/audio/` — playback controller and highlight clock
 - `scripts/` — build-time data and model pipelines
 - `public/bibles/` — generated per-book text, committed

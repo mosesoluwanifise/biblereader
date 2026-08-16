@@ -13,6 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test --project=chromium-smoke",
+    "test:supertonic:qualify": "playwright test tests/e2e/supertonicLatency.spec.ts",
     "build:bible": "node scripts/build-bible-data.mjs",
     "build:models": "node scripts/build-model-assets.mjs",
     "deploy:models": "node scripts/upload-models-to-r2.mjs"
